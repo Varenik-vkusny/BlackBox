@@ -5,3 +5,8 @@ edition = "2021"
 rust-version = "1.77"
 
 [dependencies]
+blackbox-core = { path = "../blackbox-core" }
+ratatui = "0.29"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+crossterm = "0.28"
