@@ -17,7 +17,7 @@ use ratatui::Terminal;
 
 const BRIDGE_PORT: u16 = 28765;
 const STATUS_PORT: u16 = 28766;
-const REFRESH_MS:  u64 = 1500; // auto-refresh logs every 1.5 s
+const REFRESH_MS:  u64 = 1500;
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
@@ -40,13 +40,13 @@ impl Tab {
     }
 }
 
-// ── Log entry (richer than raw string) ───────────────────────────────────────
+// ── Log entry ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct LogEntry {
-    text:      String,
-    source:    String, // "vscode_bridge" | injected
-    is_error:  bool,
+    text:     String,
+    source:   String,
+    is_error: bool,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -56,13 +56,13 @@ struct App {
     logs:         Vec<LogEntry>,
     snapshot:     String,
     metadata:     String,
-    file_path:    String,       // editable in File tab
+    file_path:    String,   // editable; supports "path:N" or "path:N-M"
     file_content: String,
-    inject_input: String,       // editable in Inject tab
+    inject_input: String,   // supports literal \n for multi-line blocks
     scroll:       usize,
     status_bar:   String,
     last_refresh: Instant,
-    editing:      bool,         // true when typing in File/Inject input
+    editing:      bool,
 }
 
 impl App {
@@ -96,9 +96,13 @@ impl App {
     }
 
     fn reset_scroll(&mut self) { self.scroll = 0; }
+
+    fn scroll_to_bottom(&mut self, content_lines: usize) {
+        self.scroll = content_lines.saturating_sub(1);
+    }
 }
 
-// ── Daemon wrapper (owns child process + JSON-RPC pipes) ──────────────────────
+// ── Daemon wrapper ────────────────────────────────────────────────────────────
 
 struct Daemon {
     _child: Child,
@@ -124,7 +128,6 @@ impl Daemon {
         std::thread::sleep(Duration::from_millis(350));
 
         let mut d = Self { _child: child, stdin, stdout, seq: 0 };
-        // handshake
         let _ = d.rpc("initialize", serde_json::json!({"protocolVersion":"2024-11-05"}));
         Ok(d)
     }
@@ -158,9 +161,9 @@ impl Drop for Daemon {
     fn drop(&mut self) { let _ = self._child.kill(); }
 }
 
-// ── Bridge helper (sends test lines to TCP port) ──────────────────────────────
+// ── Bridge helpers ────────────────────────────────────────────────────────────
 
-fn inject_line(text: &str) -> Result<(), String> {
+fn inject_one_line(text: &str) -> Result<(), String> {
     let mut s = TcpStream::connect(format!("127.0.0.1:{BRIDGE_PORT}"))
         .map_err(|e| format!("bridge: {e}"))?;
     s.set_write_timeout(Some(Duration::from_secs(2))).ok();
@@ -169,13 +172,56 @@ fn inject_line(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Splits on literal "\n" sequences so multi-line blocks can be typed in the input.
+fn inject_text(text: &str) -> Result<usize, String> {
+    let lines: Vec<&str> = text.split("\\n").collect();
+    for line in &lines {
+        inject_one_line(line)?;
+    }
+    Ok(lines.len())
+}
+
+// ── File path/range parser ────────────────────────────────────────────────────
+
+struct FileRequest {
+    path:      String,
+    from_line: Option<u64>,
+    to_line:   Option<u64>,
+}
+
+// Parse "path:N-M", "path:N", or bare "path".
+// "path:N" centres a ±20-line window around line N.
+fn parse_file_input(input: &str) -> FileRequest {
+    // rsplitn(2) splits at the rightmost ':' so Windows drive letters work.
+    let parts: Vec<&str> = input.rsplitn(2, ':').collect();
+    if parts.len() == 2 {
+        let range_part = parts[0];
+        let path = parts[1].to_string();
+        if let Some(dash) = range_part.find('-') {
+            let from = range_part[..dash].parse::<u64>().ok();
+            let to   = range_part[dash + 1..].parse::<u64>().ok();
+            if from.is_some() || to.is_some() {
+                return FileRequest { path, from_line: from, to_line: to };
+            }
+        }
+        if let Ok(n) = range_part.parse::<u64>() {
+            let from = n.saturating_sub(20).max(1);
+            let to   = n + 20;
+            return FileRequest { path, from_line: Some(from), to_line: Some(to) };
+        }
+    }
+    FileRequest { path: input.to_string(), from_line: None, to_line: None }
+}
+
 // ── Refresh helpers ───────────────────────────────────────────────────────────
 
 fn refresh_logs(daemon: &mut Daemon, app: &mut App) {
+    // Remember if user was at the bottom before refresh so we don't reset their scroll.
+    let at_bottom = app.logs.is_empty() || app.scroll >= app.logs.len().saturating_sub(1);
+
     match daemon.tool("get_terminal_buffer", serde_json::json!({"lines": 200})) {
         Ok(v) => {
             let raw = v["result"]["content"].as_str().unwrap_or("");
-            // strip XML wrapper for display
             let inner = raw
                 .trim_start_matches(|c: char| c != '\n').trim_start_matches('\n');
             let inner = if let Some(pos) = inner.rfind("</terminal_output>") {
@@ -184,20 +230,17 @@ fn refresh_logs(daemon: &mut Daemon, app: &mut App) {
 
             let returned = v["result"]["lines_returned"].as_u64().unwrap_or(0);
             app.logs = inner.lines().map(|l| {
-                let is_error = {
-                    let lo = l.to_lowercase();
-                    lo.contains("error") || lo.contains("panic")
-                        || lo.contains("failed") || lo.contains("exception")
-                };
-                LogEntry {
-                    text: l.to_string(),
-                    source: "vscode_bridge".into(),
-                    is_error,
-                }
+                let lo = l.to_lowercase();
+                let is_error = lo.contains("error") || lo.contains("panic")
+                    || lo.contains("failed") || lo.contains("exception");
+                LogEntry { text: l.to_string(), source: "vscode_bridge".into(), is_error }
             }).collect();
 
-            // auto-scroll to bottom on refresh
-            app.scroll = app.logs.len().saturating_sub(1);
+            if at_bottom {
+                app.scroll_to_bottom(app.logs.len());
+            }
+            // else: preserve user's current scroll position
+
             app.set_status(format!(
                 "Logs refreshed — {} lines in buffer  (source: vscode_bridge | untrusted)",
                 returned
@@ -229,22 +272,33 @@ fn refresh_metadata(daemon: &mut Daemon, app: &mut App) {
             let mut out = String::new();
             out.push_str("── Manifests (priority order) ──────────────────────\n");
             if let Some(arr) = v["result"]["manifests"].as_array() {
+                if arr.is_empty() {
+                    out.push_str("  (no manifests found in cwd)\n");
+                }
                 for (i, m) in arr.iter().enumerate() {
-                    out.push_str(&format!(
-                        "  [{i}] type={:<8} name={:<20} version={}\n",
-                        m["manifest_type"].as_str().unwrap_or("?"),
-                        m["name"].as_str().unwrap_or("?"),
-                        m["version"].as_str().unwrap_or("?"),
-                    ));
+                    let kind = m["manifest_type"].as_str().unwrap_or("?");
+                    let name = m["name"].as_str().unwrap_or("").trim().to_string();
+                    let version = m["version"].as_str().unwrap_or("?");
+                    // Workspace Cargo.toml has no [package] name — make that clear.
+                    let name_display = if name.is_empty() {
+                        match kind {
+                            "cargo" => "(workspace root — no [package])".to_string(),
+                            _       => "(unnamed)".to_string(),
+                        }
+                    } else {
+                        name
+                    };
+                    out.push_str(&format!("  [{i}] type={kind:<8}  name={name_display:<36}  version={version}\n"));
                 }
             }
             out.push_str("\n── .env Keys (values masked) ────────────────────────\n");
             if let Some(arr) = v["result"]["env_keys"].as_array() {
                 if arr.is_empty() {
                     out.push_str("  (no .env files found)\n");
-                }
-                for key in arr {
-                    out.push_str(&format!("  {}=<MASKED>\n", key.as_str().unwrap_or("?")));
+                } else {
+                    for key in arr {
+                        out.push_str(&format!("  {}=<MASKED>\n", key.as_str().unwrap_or("?")));
+                    }
                 }
             }
             app.metadata = out;
@@ -255,8 +309,12 @@ fn refresh_metadata(daemon: &mut Daemon, app: &mut App) {
 }
 
 fn refresh_file(daemon: &mut Daemon, app: &mut App) {
-    let path = app.file_path.clone();
-    match daemon.tool("read_file", serde_json::json!({"path": path})) {
+    let req = parse_file_input(&app.file_path);
+    let mut args = serde_json::json!({"path": req.path});
+    if let Some(f) = req.from_line { args["from_line"] = f.into(); }
+    if let Some(t) = req.to_line   { args["to_line"]   = t.into(); }
+
+    match daemon.tool("read_file", args) {
         Ok(v) => {
             if v["error"].is_object() {
                 let msg = v["error"]["message"].as_str().unwrap_or("error");
@@ -264,12 +322,15 @@ fn refresh_file(daemon: &mut Daemon, app: &mut App) {
                 app.set_status(format!("read_file error: {msg}"));
             } else {
                 let content = v["result"]["content"].as_str().unwrap_or("").to_string();
-                let from = v["result"]["from_line"].as_u64().unwrap_or(1);
-                let to   = v["result"]["to_line"].as_u64().unwrap_or(0);
-                let lines = content.lines().count();
+                let from    = v["result"]["from_line"].as_u64().unwrap_or(1);
+                let to      = v["result"]["to_line"].as_u64().unwrap_or(0);
+                let lines   = content.lines().count();
                 app.file_content = content;
                 app.reset_scroll();
-                app.set_status(format!("File: {path}  |  lines {from}–{to}  |  {lines} shown"));
+                app.set_status(format!(
+                    "File: {}  |  lines {from}–{to}  |  {lines} shown  (tip: use path:N or path:N-M)",
+                    req.path
+                ));
             }
         }
         Err(e) => app.set_status(format!("Error: {e}")),
@@ -284,9 +345,9 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> io:
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // tab bar
-                Constraint::Min(5),     // content
-                Constraint::Length(3),  // status bar
+                Constraint::Length(3),
+                Constraint::Min(5),
+                Constraint::Length(3),
             ])
             .split(area);
 
@@ -303,8 +364,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> io:
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let label = format!(" {} ", tab.label());
-            let block = Paragraph::new(label)
+            let block = Paragraph::new(format!(" {} ", tab.label()))
                 .style(style)
                 .block(Block::default().borders(Borders::ALL));
             f.render_widget(block, tab_chunks[tab.index()]);
@@ -322,9 +382,9 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> io:
 
         // ── Status bar ────────────────────────────────────────────────────────
         let help = match app.tab {
-            Tab::File   => " [e] edit path  [Enter] load  [↑↓/jk] scroll  [r] refresh  [q] quit",
-            Tab::Inject => " [e] edit input  [Enter] send  [r] clear  [q] quit",
-            _           => " [1-5] tabs  [↑↓/jk] scroll  [r] refresh  [q] quit",
+            Tab::File   => " [e] edit path (path:N or path:N-M for line range)  [Enter] load  [↑↓/jk] scroll  [q] quit",
+            Tab::Inject => " [e] edit  [Enter] send  [r] clear  — use \\n in text for multi-line blocks  [q] quit",
+            _           => " [1-5] tabs  [↑↓/jk] scroll  [r] refresh  [G] bottom  [q] quit",
         };
         let status = Paragraph::new(vec![
             Line::from(Span::styled(&app.status_bar, Style::default().fg(Color::Green))),
@@ -352,7 +412,7 @@ fn draw_logs(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }).collect();
 
     let visible = area.height.saturating_sub(2) as usize;
-    let start = app.scroll.min(app.logs.len().saturating_sub(1));
+    let start = if app.logs.is_empty() { 0 } else { app.scroll.min(app.logs.len() - 1) };
     let slice: Vec<ListItem> = items.into_iter().skip(start).take(visible).collect();
 
     let list = List::new(slice)
@@ -380,7 +440,6 @@ fn draw_file(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(3)])
         .split(area);
 
-    // path input
     let path_style = if app.editing {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -393,11 +452,10 @@ fn draw_file(f: &mut ratatui::Frame, app: &App, area: Rect) {
         else { Span::raw("") },
     ]))
     .block(Block::default().borders(Borders::ALL)
-        .title(if app.editing { " Edit path — Esc to cancel, Enter to load " }
-               else { " [e] to edit path " }));
+        .title(if app.editing { " Edit — Enter to load, Esc to cancel  (path  or  path:N  or  path:N-M) " }
+               else { " [e] edit path  —  supports  path:42  or  path:38-60 " }));
     f.render_widget(path_bar, chunks[0]);
 
-    // file content
     let visible = chunks[1].height.saturating_sub(2) as usize;
     let lines: Vec<Line> = app.file_content.lines()
         .enumerate()
@@ -424,7 +482,6 @@ fn draw_inject(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(3)])
         .split(area);
 
-    // input
     let input_style = if app.editing {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -437,33 +494,33 @@ fn draw_inject(f: &mut ratatui::Frame, app: &App, area: Rect) {
         else { Span::raw("") },
     ]))
     .block(Block::default().borders(Borders::ALL)
-        .title(if app.editing { " Type log line — Enter to inject, Esc to cancel " }
-               else { " [e] to type a log line, [Enter] to send to bridge " }));
+        .title(if app.editing { " Type log text — \\n for newline, Enter to inject, Esc to cancel " }
+               else { " [e] to type log text, [Enter] to send to bridge " }));
     f.render_widget(input, chunks[0]);
 
-    // hints
     let hint_lines = vec![
         Line::from(Span::styled(
-            "  Inject any text into the terminal buffer — the daemon receives it on port 28765.",
+            "  Inject text into the terminal buffer — daemon receives it on the TCP bridge port.",
             Style::default().fg(Color::Gray),
         )),
         Line::from(Span::raw("")),
         Line::from(vec![
-            Span::styled("  Try: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("error[E0382]: use of moved value", Style::default().fg(Color::Red)),
+            Span::styled("  Single line:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("error[E0382]: use of moved value `x`", Style::default().fg(Color::Red)),
         ]),
         Line::from(vec![
-            Span::styled("  Try: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("\x1b[31mpanic: index out of bounds\x1b[0m", Style::default().fg(Color::Yellow)),
-            Span::styled("  (ANSI will be stripped)", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Multi-line:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("error[E0308]: mismatched types\\n  --> src/main.rs:42\\n  expected `i32`, found `&str`",
+                Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
-            Span::styled("  Try: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("BUILD SUCCESS", Style::default().fg(Color::Green)),
+            Span::styled("  With ANSI:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(r"\x1b[31mpanic: index out of bounds\x1b[0m", Style::default().fg(Color::DarkGray)),
+            Span::styled("  (stripped automatically)", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(Span::raw("")),
         Line::from(Span::styled(
-            "  After injecting, switch to tab [1] and press [r] to see the line appear.",
+            "  Use \\n to split into separate lines. After injecting, go to [1] Logs and press [r].",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -484,14 +541,12 @@ fn main() -> io::Result<()> {
     let cwd = std::env::current_dir()?;
     let daemon_path = cwd.join(daemon_bin);
 
-    // Check binary exists before entering raw mode
     if !daemon_path.exists() {
         eprintln!("ERROR: daemon binary not found at {}", daemon_path.display());
         eprintln!("Run:  cargo build -p blackbox-daemon");
         std::process::exit(1);
     }
 
-    // ── TUI setup ─────────────────────────────────────────────────────────────
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -500,7 +555,6 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new();
 
-    // ── Spawn daemon ──────────────────────────────────────────────────────────
     let mut daemon = match Daemon::spawn(daemon_path.to_str().unwrap(), &cwd.to_string_lossy()) {
         Ok(d) => { app.set_status("Daemon started — use [r] to refresh, [1-5] to switch tabs"); d }
         Err(e) => {
@@ -511,11 +565,10 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // ── Event loop ────────────────────────────────────────────────────────────
     loop {
         draw(&mut terminal, &app)?;
 
-        // Auto-refresh logs tab
+        // Auto-refresh logs only when on Logs tab and not editing
         if app.tab == Tab::Logs
             && !app.editing
             && app.last_refresh.elapsed() > Duration::from_millis(REFRESH_MS)
@@ -529,7 +582,7 @@ fn main() -> io::Result<()> {
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press { continue; }
 
-            // ── Editing mode (File path / Inject input) ───────────────────────
+            // ── Editing mode ──────────────────────────────────────────────────
             if app.editing {
                 match key.code {
                     KeyCode::Esc => {
@@ -539,13 +592,15 @@ fn main() -> io::Result<()> {
                     KeyCode::Enter => {
                         app.editing = false;
                         match app.tab {
-                            Tab::File   => { refresh_file(&mut daemon, &mut app); }
+                            Tab::File => { refresh_file(&mut daemon, &mut app); }
                             Tab::Inject => {
-                                let line = app.inject_input.clone();
-                                if !line.is_empty() {
-                                    match inject_line(&line) {
-                                        Ok(_)  => {
-                                            app.set_status(format!("Injected: \"{line}\"  → switch to [1] Logs and press [r]"));
+                                let text = app.inject_input.clone();
+                                if !text.is_empty() {
+                                    match inject_text(&text) {
+                                        Ok(n) => {
+                                            app.set_status(format!(
+                                                "Injected {n} line(s) — switch to [1] Logs and press [r]"
+                                            ));
                                             app.inject_input.clear();
                                         }
                                         Err(e) => app.set_status(format!("Inject error: {e}")),
@@ -572,36 +627,34 @@ fn main() -> io::Result<()> {
 
             // ── Normal mode ───────────────────────────────────────────────────
             match key.code {
-                // quit
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
 
-                // tab switching
+                // Tab switching
                 KeyCode::Char('1') => { app.tab = Tab::Logs;     app.reset_scroll(); }
                 KeyCode::Char('2') => { app.tab = Tab::Snapshot; app.reset_scroll(); refresh_snapshot(&mut daemon, &mut app); }
                 KeyCode::Char('3') => { app.tab = Tab::Metadata; app.reset_scroll(); refresh_metadata(&mut daemon, &mut app); }
                 KeyCode::Char('4') => { app.tab = Tab::File;     app.reset_scroll(); }
                 KeyCode::Char('5') => { app.tab = Tab::Inject;   app.reset_scroll(); }
 
-                // refresh
+                // Refresh
                 KeyCode::Char('r') => {
-                    app.reset_scroll();
                     match app.tab {
-                        Tab::Logs     => { refresh_logs(&mut daemon, &mut app);     app.last_refresh = Instant::now(); }
-                        Tab::Snapshot => refresh_snapshot(&mut daemon, &mut app),
-                        Tab::Metadata => refresh_metadata(&mut daemon, &mut app),
-                        Tab::File     => refresh_file(&mut daemon, &mut app),
+                        Tab::Logs     => { refresh_logs(&mut daemon, &mut app); app.last_refresh = Instant::now(); }
+                        Tab::Snapshot => { app.reset_scroll(); refresh_snapshot(&mut daemon, &mut app); }
+                        Tab::Metadata => { app.reset_scroll(); refresh_metadata(&mut daemon, &mut app); }
+                        Tab::File     => { app.reset_scroll(); refresh_file(&mut daemon, &mut app); }
                         Tab::Inject   => { app.inject_input.clear(); app.set_status("Input cleared"); }
                     }
                 }
 
-                // edit mode
+                // Edit mode
                 KeyCode::Char('e') if matches!(app.tab, Tab::File | Tab::Inject) => {
                     app.editing = true;
                     let tab = app.tab;
                     app.set_status(match tab {
-                        Tab::File   => "Editing path — type path, Enter to load, Esc to cancel",
-                        Tab::Inject => "Type log line — Enter to inject, Esc to cancel",
+                        Tab::File   => "Editing path — type path (or path:N or path:N-M), Enter to load, Esc to cancel",
+                        Tab::Inject => "Type log text — use \\n for newlines, Enter to inject, Esc to cancel",
                         _           => "",
                     });
                 }
@@ -609,19 +662,19 @@ fn main() -> io::Result<()> {
                     refresh_file(&mut daemon, &mut app);
                 }
                 KeyCode::Enter if app.tab == Tab::Inject && !app.inject_input.is_empty() => {
-                    let line = app.inject_input.clone();
-                    match inject_line(&line) {
-                        Ok(_)  => {
-                            app.set_status(format!("Injected: \"{line}\"  → switch to [1] and [r]"));
+                    let text = app.inject_input.clone();
+                    match inject_text(&text) {
+                        Ok(n) => {
+                            app.set_status(format!("Injected {n} line(s) — switch to [1] and [r]"));
                             app.inject_input.clear();
                         }
                         Err(e) => app.set_status(format!("Inject error: {e}")),
                     }
                 }
 
-                // scroll
+                // Scroll
                 KeyCode::Up   | KeyCode::Char('k') => app.scroll_up(),
-                KeyCode::Down | KeyCode::Char('j')  => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     let lines = match app.tab {
                         Tab::Logs     => app.logs.len(),
                         Tab::Snapshot => app.snapshot.lines().count(),
@@ -632,13 +685,16 @@ fn main() -> io::Result<()> {
                     let viewport = terminal.size()?.height.saturating_sub(8) as usize;
                     app.scroll_down(lines, viewport);
                 }
-                KeyCode::Home  => app.reset_scroll(),
-                KeyCode::End   => {
+                KeyCode::Home | KeyCode::Char('g') => app.reset_scroll(),
+                KeyCode::End  | KeyCode::Char('G') => {
                     let lines = match app.tab {
-                        Tab::Logs => app.logs.len(),
-                        _         => 0,
+                        Tab::Logs     => app.logs.len(),
+                        Tab::Snapshot => app.snapshot.lines().count(),
+                        Tab::Metadata => app.metadata.lines().count(),
+                        Tab::File     => app.file_content.lines().count(),
+                        Tab::Inject   => 0,
                     };
-                    app.scroll = lines.saturating_sub(1);
+                    app.scroll_to_bottom(lines);
                 }
 
                 _ => {}
@@ -646,7 +702,6 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())

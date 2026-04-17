@@ -1,9 +1,25 @@
 # BlackBox — Phase 1 Workspace Guide
 
+## Phase 1 Requirements (All Complete ✅)
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| **Terminal bridge plugin** | VS Code extension subscribes to `onDidWriteTerminalData`, sends to TCP 127.0.0.1:8765 | ✅ |
+| **Ring buffer + memory bound** | `Arc<RwLock<VecDeque<LogLine>>>`, 5000-line capacity, FIFO eviction | ✅ |
+| **ANSI stripping** | OnceLock regex pattern covers CSI/OSC/charset/BS/CR | ✅ |
+| **Git scanner** | `gix` library: branch name + dirty file count | ✅ |
+| **Manifest detection** | Priority order: Cargo > Go > npm; returns all; ProjectKind enum | ✅ |
+| **.env masking** | Regex captures key names only; values never exposed | ✅ |
+| **MCP tools (4)** | get_snapshot, get_terminal_buffer, get_project_metadata, read_file | ✅ |
+| **Path traversal protection** | canonicalize + starts_with validation | ✅ |
+| **XML injection guard** | Escape `</terminal_output>` in wrapped output | ✅ |
+| **Status TUI (blackbox-tui)** | ratatui dashboard polling status_server port 8766 | ✅ |
+| **Interactive sandbox** | 5-tab TUI for manual testing without AI agent (bonus) | ✅ |
+
 ## Phase Status
-- **Phase 1 Complete**: MVP daemon (MCP server, ring buffer, TCP bridge, TUI, interactive sandbox)
-- **Phase 2 Not Started**: Docker + smart compression + git diffs
-- **Phase 3 Not Started**: PTY interception + PII masking
+- **Phase 1**: ✅ Complete (MVP daemon + VS Code bridge + sandbox)
+- **Phase 2**: Docker, smart git diffs, compression (not started)
+- **Phase 3**: OS-level PTY interception, PII masking (not started)
 
 ## Cargo Workspace Pattern
 - Workspace root: `[workspace.package]` with version, edition = "2021", rust-version = "1.77"
@@ -48,6 +64,16 @@
 - `blackbox-sandbox`: 5-tab TUI (Logs, Snapshot, Metadata, File, Inject)
 - Manual tool calling without AI agent, reusable across Phase 2/3
 - Spawn daemon internally, own stdin/stdout pipes
+
+## Sandbox UI Patterns
+- **Scroll preservation**: Check `scroll >= content_len - 1` before auto-refresh to preserve user scroll; only pin to bottom if already there
+- **Multi-line input**: Accept `\n` literals in text fields for blocks (split on `\n` before sending)
+- **File range syntax**: `path:N` = 20-line window around line N; `path:N-M` = explicit range (use `rsplitn(2, ':')` to avoid Windows drive letter issues)
+- **Empty manifest name**: Workspace `Cargo.toml` has no `[package]` — display `(workspace root — no [package])` instead of blank
+
+## Permissions Best Practices
+- **Broad wildcards over specific rules**: `Bash(git *)` instead of listing 8 specific git commands; `Bash(cargo *)` instead of 3 specific cargo subcommands
+- **Consolidation goal**: Reduce `.claude/settings.json` maintenance burden; audit allow list annually
 
 ## Dependencies
 - `gix` over `git2-rs`: pure Rust, no libgit2 C bindings, simpler MSRV
