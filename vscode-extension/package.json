@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "publisher": "blackbox",
   "engines": { "vscode": "^1.87.0" },
+  "enableProposedApi": ["vscode.proposed.terminalDataWriteEvent"],
   "categories": ["Other"],
   "main": "./out/extension.js",
   "activationEvents": ["onStartupFinished"],
