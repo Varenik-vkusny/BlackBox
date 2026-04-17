@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/blackbox-core",
+    "crates/blackbox-daemon",
+    "crates/blackbox-tui",
+]
+resolver = "2"

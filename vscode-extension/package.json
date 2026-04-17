@@ -1,0 +1,17 @@
+{
+  "name": "blackbox-bridge",
+  "displayName": "BlackBox Bridge",
+  "description": "Terminal bridge for BlackBox MCP daemon",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.87.0" },
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {},
+  "scripts": {
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.87.0",
+    "typescript": "^5.4.0"
+  }
+}
