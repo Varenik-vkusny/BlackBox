@@ -1,3 +1,5 @@
+mod buffer;
+
 fn main() {
-    println!("Hello, world!");
+    println!("BlackBox daemon starting...");
 }
