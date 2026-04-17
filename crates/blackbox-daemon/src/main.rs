@@ -1,6 +1,7 @@
 mod buffer;
-mod tcp_bridge;
+mod mcp;
 mod scanners;
+mod tcp_bridge;
 
 fn main() {
     println!("BlackBox daemon starting...");
