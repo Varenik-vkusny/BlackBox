@@ -9,3 +9,4 @@ blackbox-core = { path = "../blackbox-core" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 regex = "1.10"
+gix = { version = "0.70", features = ["max-performance-safe"] }
