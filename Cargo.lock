@@ -82,6 +82,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "blackbox-test"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "blackbox-tui"
 version = "0.1.0"
 dependencies = [
