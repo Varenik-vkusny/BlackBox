@@ -1,16 +1,20 @@
 {
   "name": "blackbox-bridge",
   "displayName": "BlackBox Bridge",
-  "description": "Terminal bridge for BlackBox MCP daemon",
+  "description": "Silently forwards terminal output to the BlackBox MCP daemon for AI context capture.",
   "version": "0.1.0",
+  "publisher": "blackbox",
   "engines": { "vscode": "^1.87.0" },
+  "categories": ["Other"],
   "main": "./out/extension.js",
   "activationEvents": ["onStartupFinished"],
   "contributes": {},
   "scripts": {
-    "compile": "tsc -p ./"
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "@types/vscode": "^1.87.0",
     "typescript": "^5.4.0"
   }
