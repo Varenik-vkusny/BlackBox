@@ -3,7 +3,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blackbox_core::types::LogLine;
-use regex::Regex;
 
 const BUFFER_CAPACITY: usize = 5000;
 
@@ -13,8 +12,16 @@ pub fn new_buffer() -> SharedBuffer {
     Arc::new(RwLock::new(VecDeque::with_capacity(BUFFER_CAPACITY)))
 }
 
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 pub fn push_line(buf: &SharedBuffer, text: String) {
-    let text = strip_ansi(&text);
+    let text = crate::scanners::ansi::strip_ansi_stateless(&text);
+    let text = crate::pii_masker::mask_pii(&text);
     if text.trim().is_empty() {
         return;
     }
@@ -40,6 +47,16 @@ pub fn buffer_len(buf: &SharedBuffer) -> usize {
     buf.read().unwrap().len()
 }
 
+/// Push a line to both the ring buffer and the Drain compression state.
+pub fn push_line_and_drain(buf: &SharedBuffer, drain: &crate::scanners::drain::SharedDrainState, text: String) {
+    push_line(buf, text);
+    // Drain ingests the already-stripped line from the buffer.
+    let line = buf.read().unwrap().back().cloned();
+    if let Some(l) = line {
+        crate::scanners::drain::ingest_line(drain, &l);
+    }
+}
+
 pub fn has_recent_errors(buf: &SharedBuffer) -> bool {
     let guard = buf.read().unwrap();
     // Check last 200 lines for error indicators
@@ -51,16 +68,6 @@ pub fn has_recent_errors(buf: &SharedBuffer) -> bool {
     })
 }
 
-// @TODO [Future Upgrade]: Replace with proper state-machine ANSI parser (Phase 3)
-fn strip_ansi(text: &str) -> String {
-    // Lazy static to compile regex only once
-    static ANSI_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = ANSI_RE.get_or_init(|| {
-        Regex::new(r"\x1b\[[0-9;]*[mGKHFJABCDsu]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x08|\x0d")
-            .expect("valid ANSI regex")
-    });
-    re.replace_all(text, "").into_owned()
-}
 
 #[cfg(test)]
 mod tests {

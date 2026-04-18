@@ -14,11 +14,20 @@ const windowEx = vscode.window as unknown as WindowWithProposedApi;
 
 const DAEMON_PORT = 8765;
 const DAEMON_HOST = '127.0.0.1';
-const RECONNECT_DELAY_MS = 3000;
+const BASE_DELAY_MS = 1_000;
+const MAX_DELAY_MS = 30_000;
 
 let socket: net.Socket | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let isDeactivating = false;
+let reconnectAttempts = 0;
+
+function getReconnectDelay(): number {
+    const exp = Math.min(BASE_DELAY_MS * Math.pow(2, reconnectAttempts), MAX_DELAY_MS);
+    const jitter = exp * 0.2 * Math.random();
+    reconnectAttempts++;
+    return Math.floor(exp + jitter);
+}
 
 export function activate(context: vscode.ExtensionContext): void {
     connect();
@@ -55,7 +64,7 @@ function connect(): void {
     socket = net.createConnection({ port: DAEMON_PORT, host: DAEMON_HOST });
 
     socket.on('connect', () => {
-        // Connection established — no user notification, plugin is invisible
+        reconnectAttempts = 0; // reset backoff on successful connect
     });
 
     socket.on('error', () => {
@@ -76,5 +85,5 @@ function scheduleReconnect(): void {
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         connect();
-    }, RECONNECT_DELAY_MS);
+    }, getReconnectDelay());
 }

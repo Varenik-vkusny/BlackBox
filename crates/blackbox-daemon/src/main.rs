@@ -1,11 +1,21 @@
 mod buffer;
+mod daemon_state;
+mod docker;
 mod mcp;
+mod pii_masker;
 mod scanners;
 mod status_server;
 mod tcp_bridge;
+mod typed_context;
+mod admin_api;
 
 use std::path::PathBuf;
 use std::time::Instant;
+
+use buffer::new_buffer;
+use daemon_state::DaemonState;
+use docker::error_store::new_error_store;
+use scanners::drain::new_drain_state;
 
 #[tokio::main]
 async fn main() {
@@ -20,28 +30,51 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8766);
 
-    let buf = buffer::new_buffer();
-    let start_time = Instant::now();
+    let state = DaemonState {
+        buf: new_buffer(),
+        drain: new_drain_state(),
+        error_store: new_error_store(),
+        cwd,
+        start_time: Instant::now(),
+    };
 
-    let buf_bridge = buf.clone();
-    let buf_status = buf.clone();
-    let buf_mcp = buf.clone();
-    let cwd_status = cwd.clone();
-    let cwd_mcp = cwd.clone();
+    let bridge_task = {
+        let buf = state.buf.clone();
+        let drain = state.drain.clone();
+        tokio::spawn(async move {
+            tcp_bridge::run_tcp_bridge(buf, drain, bridge_port).await;
+        })
+    };
 
-    let bridge_task = tokio::spawn(async move {
-        tcp_bridge::run_tcp_bridge(buf_bridge, bridge_port).await;
-    });
+    let status_task = {
+        let s = state.clone();
+        tokio::spawn(async move {
+            status_server::run_status_server(s.buf, s.cwd, s.start_time, status_port).await;
+        })
+    };
 
-    let status_task = tokio::spawn(async move {
-        status_server::run_status_server(buf_status, cwd_status, start_time, status_port).await;
-    });
+    let mcp_task = {
+        let s = state.clone();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                mcp::run_mcp_stdio(s).await;
+            });
+        })
+    };
 
-    let mcp_task = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async move {
-            mcp::run_mcp_stdio(buf_mcp, cwd_mcp, start_time).await;
-        });
-    });
+    let admin_task = {
+        let s = state.clone();
+        tokio::spawn(async move {
+            admin_api::run_admin_api(s, 8768).await;
+        })
+    };
+
+    let docker_task = {
+        let store = state.error_store.clone();
+        tokio::spawn(async move {
+            docker::run_docker_monitor(store).await;
+        })
+    };
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
@@ -50,6 +83,8 @@ async fn main() {
         _ = bridge_task => {}
         _ = status_task => {}
         _ = mcp_task => {}
+        _ = admin_task => {}
+        _ = docker_task => {}
     }
 }
 

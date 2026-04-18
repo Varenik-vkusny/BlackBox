@@ -178,8 +178,11 @@ fn main() {
             let tools: Vec<&str> = v["result"]["tools"].as_array()
                 .unwrap_or(&empty).iter()
                 .filter_map(|t| t["name"].as_str()).collect();
-            r.check("tools/list → 4 tools", tools.len() == 4, &format!("got {}: {tools:?}", tools.len()));
-            for name in ["get_snapshot", "get_terminal_buffer", "get_project_metadata", "read_file"] {
+            r.check("tools/list → 7 tools", tools.len() == 7, &format!("got {}: {tools:?}", tools.len()));
+            for name in [
+                "get_snapshot", "get_terminal_buffer", "get_project_metadata", "read_file",
+                "get_compressed_errors", "get_contextual_diff", "get_container_logs",
+            ] {
                 r.check(&format!("  tool '{name}' present"), tools.contains(&name), "not in list");
             }
         }
@@ -352,13 +355,93 @@ fn main() {
         Err(e) => r.fail("status server connect", &e.to_string()),
     }
 
+    // ── 8. get_compressed_errors — cluster deduplication ─────────────────────
+    r.section("8 · get_compressed_errors — Drain clustering");
+
+    // Inject 50 identical error lines via TCP bridge.
+    let error_lines: Vec<&str> = vec!["error: connection refused to 127.0.0.1:5432"; 50];
+    let bridge_ok = send_to_bridge(&error_lines);
+    r.check("50 error lines injected", bridge_ok.is_ok(), &bridge_ok.err().unwrap_or_default());
+    thread::sleep(Duration::from_millis(200));
+
+    match d.send(call(20, "get_compressed_errors", serde_json::json!({"limit": 100}))) {
+        Ok(v) => {
+            let res = &v["result"];
+            r.check("clusters array present",      res["clusters"].is_array(),      "missing");
+            r.check("stack_traces array present",  res["stack_traces"].is_array(),  "missing");
+            r.check("total_error_lines present",   res["total_error_lines"].is_number(), "missing");
+            let clusters = res["clusters"].as_array().unwrap();
+            let cluster_count = clusters
+                .iter()
+                .find(|c| c["pattern"].as_str().unwrap_or("").contains("connection refused"))
+                .and_then(|c| c["count"].as_u64())
+                .unwrap_or(0);
+            r.check(
+                "50 identical lines collapsed to 1 cluster with count ≥ 50",
+                cluster_count >= 50,
+                &format!("count was {cluster_count}"),
+            );
+        }
+        Err(e) => r.fail("get_compressed_errors", &e),
+    }
+
+    // Inject a Rust panic block for stack trace parsing.
+    let _ = send_to_bridge(&[
+        "thread 'main' panicked at 'assertion failed', src/db.rs:42:5",
+        "   0: myapp::db::connect",
+        "      at src/db.rs:42",
+        "   1: myapp::main",
+        "      at src/main.rs:10",
+        "   2: std::rt::lang_start",
+    ]);
+    thread::sleep(Duration::from_millis(200));
+
+    match d.send(call(21, "get_compressed_errors", serde_json::json!({}))) {
+        Ok(v) => {
+            let traces = v["result"]["stack_traces"].as_array();
+            r.check(
+                "Rust panic produces stack_traces entry",
+                traces.map(|t| !t.is_empty()).unwrap_or(false),
+                "stack_traces was empty after injecting panic",
+            );
+        }
+        Err(e) => r.fail("get_compressed_errors stack traces", &e),
+    }
+
+    // ── 9. get_contextual_diff ────────────────────────────────────────────────
+    r.section("9 · get_contextual_diff");
+
+    match d.send(call(22, "get_contextual_diff", serde_json::json!({}))) {
+        Ok(v) => {
+            let res = &v["result"];
+            r.check("diff_hunks array present",         res["diff_hunks"].is_array(),            "missing");
+            r.check("files_cross_referenced present",   res["files_cross_referenced"].is_array(), "missing");
+            r.check("truncated field present",          res["truncated"].is_boolean(),            "missing");
+        }
+        Err(e) => r.fail("get_contextual_diff", &e),
+    }
+
+    // ── 10. get_container_logs (Docker not required) ──────────────────────────
+    r.section("10 · get_container_logs (graceful when Docker absent)");
+
+    match d.send(call(23, "get_container_logs", serde_json::json!({"limit": 10}))) {
+        Ok(v) => {
+            let res = &v["result"];
+            r.check("returns valid JSON (no error code)", v["error"].is_null(), &v.to_string());
+            r.check("containers array present",          res["containers"].is_array(),  "missing");
+            r.check("events array present",              res["events"].is_array(),      "missing");
+            r.check("docker_available field present",    res["docker_available"].is_boolean(), "missing");
+        }
+        Err(e) => r.fail("get_container_logs", &e),
+    }
+
     // ── Teardown & summary ────────────────────────────────────────────────────
     d.stop();
 
     let passed = r.summary();
     println!();
     if passed {
-        println!("{GREEN}{BOLD}✓  All tests passed — Phase 1 MVP verified{RESET}");
+        println!("{GREEN}{BOLD}✓  All tests passed — Phase 1 + Phase 2 verified{RESET}");
     } else {
         println!("{RED}{BOLD}✗  Some tests failed — see details above{RESET}");
     }

@@ -1,15 +1,13 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
-use std::time::Instant;
 
 use blackbox_core::protocol::{error_codes, JsonRpcRequest, JsonRpcResponse};
 use serde_json::{json, Value};
 
-use crate::buffer::SharedBuffer;
+use crate::daemon_state::DaemonState;
 
 pub mod tools;
 
-pub async fn run_mcp_stdio(buf: SharedBuffer, cwd: PathBuf, start_time: Instant) {
+pub async fn run_mcp_stdio(state: DaemonState) {
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -19,7 +17,7 @@ pub async fn run_mcp_stdio(buf: SharedBuffer, cwd: PathBuf, start_time: Instant)
             _ => continue,
         };
 
-        let response = handle_message(&line, &buf, &cwd, start_time).await;
+        let response = handle_message(&line, &state).await;
         let mut json = serde_json::to_string(&response).unwrap_or_default();
         json.push('\n');
 
@@ -29,12 +27,7 @@ pub async fn run_mcp_stdio(buf: SharedBuffer, cwd: PathBuf, start_time: Instant)
     }
 }
 
-async fn handle_message(
-    line: &str,
-    buf: &SharedBuffer,
-    cwd: &PathBuf,
-    start_time: Instant,
-) -> JsonRpcResponse {
+async fn handle_message(line: &str, state: &DaemonState) -> JsonRpcResponse {
     let req: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(_) => {
@@ -47,10 +40,12 @@ async fn handle_message(
     match req.method.as_str() {
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id),
-        "tools/call" => {
-            tools::handle_tools_call(id, req.params, buf, cwd, start_time).await
-        }
-        _ => JsonRpcResponse::error(id, error_codes::METHOD_NOT_FOUND, format!("Method not found: {}", req.method)),
+        "tools/call" => tools::handle_tools_call(id, req.params, state).await,
+        _ => JsonRpcResponse::error(
+            id,
+            error_codes::METHOD_NOT_FOUND,
+            format!("Method not found: {}", req.method),
+        ),
     }
 }
 
@@ -104,6 +99,53 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                             "to_line": { "type": "integer", "description": "End line (1-based, optional)" }
                         },
                         "required": ["path"]
+                    }
+                },
+                {
+                    "name": "get_compressed_errors",
+                    "description": "Returns deduplicated error clusters (Drain algorithm) and parsed stack traces from terminal output. More token-efficient than get_terminal_buffer for error analysis.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "integer", "description": "Max clusters to return (default: 50)" }
+                        }
+                    }
+                },
+                {
+                    "name": "get_contextual_diff",
+                    "description": "Returns git diff hunks cross-referenced with files mentioned in recent stack traces. Surgical precision: only diffs files relevant to current errors.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "get_container_logs",
+                    "description": "Returns filtered Docker container error events (ERROR/WARN/FATAL only). Returns docker_available: false when Docker is not running.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "container_id": { "type": "string", "description": "Optional container ID or name filter" },
+                            "limit": { "type": "integer", "description": "Max events to return (default: 50)" }
+                        }
+                    }
+                },
+                {
+                    "name": "get_postmortem",
+                    "description": "Timeline analysis of the last N minutes of activity. Groups log lines by minute, counts error spikes, and surfaces stack traces within the window. Use after an incident to understand the chain of events.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "minutes": { "type": "integer", "description": "History window in minutes (default: 30, max: 1440)" }
+                        }
+                    }
+                },
+                {
+                    "name": "get_correlated_errors",
+                    "description": "Cross-references terminal errors with Docker container events by timestamp proximity. Reveals whether a terminal panic and a Docker container crash happened within the same time window.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "window_secs": { "type": "integer", "description": "Time window for correlation in seconds (default: 5)" },
+                            "limit": { "type": "integer", "description": "Max terminal errors to correlate (default: 20)" }
+                        }
                     }
                 }
             ]

@@ -1,4 +1,36 @@
+# Rust
 /target/
+**/*.rs.bk
+*.bak
+*.tmp
+core
+
+# Node.js
+**/node_modules/
+**/dist/
+**/build/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDEs / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Project Specific
 vscode-extension/out/
-vscode-extension/node_modules/
 .claude/
+.gemini/
+.antigravity/
+
+# Environment / Sensitive
+.env
+.env.*
+!.env.example
+*.local

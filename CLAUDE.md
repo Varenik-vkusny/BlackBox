@@ -1,4 +1,4 @@
-# BlackBox — Phase 1 Workspace Guide
+# BlackBox — Phase 1 & 2 Workspace Guide
 
 ## Phase 1 Requirements (All Complete ✅)
 
@@ -12,13 +12,25 @@
 | **.env masking** | Regex captures key names only; values never exposed | ✅ |
 | **MCP tools (4)** | get_snapshot, get_terminal_buffer, get_project_metadata, read_file | ✅ |
 | **Path traversal protection** | canonicalize + starts_with validation | ✅ |
-| **XML injection guard** | Escape `</terminal_output>` in wrapped output | ✅ |
+| **XML injection guard** | Escape `</terminal_output>` + common HTML tags in wrapped output | ✅ |
 | **Status TUI (blackbox-tui)** | ratatui dashboard polling status_server port 8766 | ✅ |
 | **Interactive sandbox** | 5-tab TUI for manual testing without AI agent (bonus) | ✅ |
 
+## Phase 2 Requirements (All Complete ✅)
+
+| Requirement | Implementation | Status |
+|---|---|---|
+| **Log deduplication (Drain)** | `scanners/drain.rs`: prefix-tree clustering, 1000-cluster cap, wildcard merging | ✅ |
+| **Stack trace parsing** | `scanners/stacktrace.rs`: Rust/Python/Node.js/Java state-machine parsers, stdlib filtering | ✅ |
+| **Smart git diffs** | `scanners/git.rs`: `get_changed_files` + `get_diff_hunks` via `git diff` subprocess | ✅ |
+| **Docker monitoring** | `docker/mod.rs` with bollard: stream logs, demux stdout/stderr, filter ERROR/WARN/FATAL | ✅ |
+| **DaemonState refactor** | `daemon_state.rs`: single struct threading buf + drain + error_store through tasks | ✅ |
+| **Blocking I/O fix** | `scan_git`/`scan_manifests`/`scan_env_keys` wrapped in `spawn_blocking` | ✅ |
+| **MCP tools (3 new = 7 total)** | get_compressed_errors, get_contextual_diff, get_container_logs | ✅ |
+
 ## Phase Status
 - **Phase 1**: ✅ Complete (MVP daemon + VS Code bridge + sandbox)
-- **Phase 2**: Docker, smart git diffs, compression (not started)
+- **Phase 2**: ✅ Complete (compression, Docker monitoring, smart diffs — 7 MCP tools total)
 - **Phase 3**: OS-level PTY interception, PII masking (not started)
 
 ## Cargo Workspace Pattern
@@ -75,6 +87,73 @@
 - **Broad wildcards over specific rules**: `Bash(git *)` instead of listing 8 specific git commands; `Bash(cargo *)` instead of 3 specific cargo subcommands
 - **Consolidation goal**: Reduce `.claude/settings.json` maintenance burden; audit allow list annually
 
+## Phase 2 Architecture Patterns
+
+### DaemonState
+- `daemon_state.rs`: single `DaemonState` struct (`buf`, `drain`, `error_store`, `cwd`, `start_time`) — `Clone` is cheap, all fields are `Arc` or `Copy`
+- Thread `DaemonState` through tasks by cloning; avoids growing function-argument lists
+
+### Drain Algorithm (`scanners/drain.rs`)
+- `DrainState { prefix_tree: HashMap<usize, Vec<LogCluster>> }` — keyed by token count
+- Similarity = `matching_tokens / token_count`; threshold 0.5; wildcards stored as `*`
+- `push_line_and_drain(buf, drain, line)` in `buffer.rs` keeps both in sync
+- Cluster cap: 1000; evict oldest by `last_seen_ms`
+
+### Stack Trace Parser (`scanners/stacktrace.rs`)
+- State-machine per language: Rust panic / Python Traceback / Node.js Error / Java Exception
+- Minimum 2 frames to avoid false positives
+- `extract_source_files(traces)` → deduped list used for git diff cross-reference
+- Python: check `lines[j].text.starts_with(' ')` (original, not trimmed) to detect indented code lines vs exception message
+
+### Smart Git Diffs (`scanners/git.rs`)
+- `get_changed_files`: runs `git diff --name-status HEAD` + `git diff --name-status --cached`
+- `get_diff_hunks`: runs `git diff HEAD -U3 -- <files>`, parses unified diff output
+- Cap: 50 hunks total, 30 lines/hunk; returns `truncated: bool`
+- Intersection pattern: `error_files ∩ changed_files` = only relevant hunks
+
+### Docker Monitoring (`docker/`)
+- `bollard::Docker::connect_with_local_defaults()` — handles Windows named pipe automatically
+- `docker/demux.rs`: 8-byte header `[stream_type(1), 0, 0, 0, size(4 BE)]`
+- `docker/log_filter.rs`: JSON level detection → keep ERROR/WARN/FATAL; plain text stderr always kept
+- `docker/error_store.rs`: `HashMap<String, VecDeque<ErrorEvent>>` per container, 500-entry cap
+- Retry loop: 10s wait when Docker unavailable; `get_container_logs` returns `docker_available: false` (not error)
+
+### Log Analysis & Graceful Fallbacks (`mcp/tools.rs`)
+- **4 supported languages**: Rust panic / Python Traceback / Node.js Error / Java Exception (state-machine parsers, not regex)
+- **Filtering**: ERROR/WARN/FATAL only; minimum 2 frames per trace to avoid single-line false positives; stdlib frames filtered per language
+- **Drain deduplication**: Groups identical-length log lines by similarity (≥0.5 threshold); wildcard merging (`*` replaces differing tokens); 1000-cluster cap, FIFO eviction
+- **Graceful fallback chain** (every tool guarantees non-empty response):
+  - `get_contextual_diff` → diff hunks (if match) OR compressed_errors (if no match) OR terminal_buffer (if no clusters) OR `fallback_source: "none"`
+  - `get_compressed_errors` → clusters + traces (if any) OR terminal_buffer (if empty) OR `fallback_source: "none"`
+  - `get_container_logs` → events (if Docker running) OR compressed_errors (if Docker unavailable) OR terminal_buffer OR `fallback_source: "none"`
+  - **Each response includes `fallback_source` field** so AI learns which source is most useful for specific parts of project
+- **Intersection pattern for diffs**: Extract files from stack traces, cross-reference with dirty git files (not all project files) for surgical precision
+- **Docker availability signal**: `docker_available: true` + empty events = connected but no errors; `docker_available: false` = not reachable (triggers fallback)
+
+## Diagnostics & Gotchas
+
+### Windows File Corruption
+- **Symptom**: `git diff` shows `Binary files differ` but file looks normal in editor
+- **Cause**: VS Code or system appends UTF-16 encoded bytes (e.g., `// test\n` becomes `2F 00 2F 00 20 00 74 00 65 00 73 00 74 00 0A 00 0A 00`)
+- **Fix**: Use PowerShell `[System.IO.File]::ReadAllBytes("path")` to find where clean bytes end (look for last `0A 0A` = `\n\n`), truncate to that point, write back as UTF-8
+- **Prevention**: Don't manually append test code to files; use proper test injection via `blackbox-sandbox` inject tab
+
+### Windows .exe File Lock on Rebuild
+- **Symptom**: `cargo build` fails with "Access is denied" when daemon/sandbox is running
+- **Fix**: Run `Stop-Process -Name "blackbox-daemon","blackbox-sandbox" -Force -ErrorAction SilentlyContinue` via PowerShell before rebuild
+- **Note**: Bash shell (`/usr/bin/bash`) cannot run PowerShell commands; use PowerShell tool directly
+
+### git diff Validation
+- Always verify `git diff HEAD -- <file>` returns text output (contains `+++ b/` and `@@ ` hunk headers), not `Binary files differ`
+- If binary, file is either actually binary or has corruption; check with PowerShell `ReadAllBytes` before parsing
+
+### Drain Bucketing Constraint
+- Similarity calculation only meaningful within same token-count bucket (e.g., 4-token lines grouped separately from 5-token lines)
+- Different-length lines always spawn separate clusters (not a bug; inherent to Drain algorithm)
+- Example: `"error: timeout to 10.0.0.1"` (4 tokens) never merges with `"error: timeout connecting to 10.0.0.1"` (5 tokens)
+
 ## Dependencies
 - `gix` over `git2-rs`: pure Rust, no libgit2 C bindings, simpler MSRV
 - `ratatui 0.29+` for TUI, `crossterm 0.28+` for terminal control
+- `bollard 0.17` for Docker Engine API (Unix socket + Windows named pipe)
+- `futures-util 0.3` for `StreamExt` trait on bollard log streams

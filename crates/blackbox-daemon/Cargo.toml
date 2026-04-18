@@ -8,5 +8,10 @@ rust-version = "1.77"
 blackbox-core = { path = "../blackbox-core" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
-regex = "1.10"
+regex = "1.10"  # used by pii_masker
 gix = { version = "0.70", features = ["max-performance-safe"] }
+bollard = { workspace = true }
+futures-util = "0.3"
+serde = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
