@@ -41,6 +41,9 @@ pub async fn run_admin_api(state: DaemonState, port: u16) {
         .route("/api/correlated", get(get_correlated_handler))
         .route("/api/inject", post(inject_log))
         .route("/api/clear", post(clear_logs))
+        .route("/api/watch", post(watch_file))
+        // MCP Streamable HTTP transport endpoint
+        .route("/mcp", post(mcp_http_handler))
         .layer(cors)
         .with_state(state);
 
@@ -52,7 +55,9 @@ pub async fn run_admin_api(state: DaemonState, port: u16) {
             return;
         }
     };
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Admin API server error: {e}");
+    }
 }
 
 async fn get_status(State(state): State<DaemonState>) -> impl IntoResponse {
@@ -148,18 +153,16 @@ async fn get_correlated_handler(State(state): State<DaemonState>) -> impl IntoRe
 #[derive(Deserialize)]
 struct InjectRequest {
     text: String,
+    terminal: Option<String>,
 }
 
 async fn inject_log(
     State(state): State<DaemonState>,
     Json(payload): Json<InjectRequest>,
 ) -> impl IntoResponse {
-    // Split on newlines so multi-line stack traces become separate LogLines,
-    // which is required for the stack trace state-machine parser to detect them.
-    // Use push_line_and_drain so the Drain clustering state also gets updated.
     for line in payload.text.split('\n') {
         if !line.trim().is_empty() {
-            push_line_and_drain(&state.buf, &state.drain, line.to_string());
+            push_line_and_drain(&state.buf, &state.drain, line.to_string(), payload.terminal.clone());
         }
     }
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
@@ -170,3 +173,116 @@ async fn clear_logs(State(state): State<DaemonState>) -> impl IntoResponse {
     buf.clear();
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
+
+#[derive(Deserialize)]
+struct WatchRequest {
+    path: String,
+}
+
+async fn watch_file(
+    State(state): State<DaemonState>,
+    Json(payload): Json<WatchRequest>,
+) -> impl IntoResponse {
+    let abs_path = if std::path::Path::new(&payload.path).is_absolute() {
+        std::path::PathBuf::from(&payload.path)
+    } else {
+        state.cwd.join(&payload.path)
+    };
+
+    if !abs_path.exists() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("file not found: {}", payload.path) })),
+        );
+    }
+
+    let mut list = state.watch_list.write().unwrap();
+    if list.contains(&abs_path) {
+        return (StatusCode::OK, Json(serde_json::json!({ "status": "already_watching" })));
+    }
+    list.push(abs_path);
+    (StatusCode::OK, Json(serde_json::json!({ "status": "watching", "path": payload.path })))
+}
+
+// ── MCP Streamable HTTP transport ────────────────────────────────────────────
+//
+// POST /mcp  accepts a single JSON-RPC 2.0 message and returns a JSON response.
+// This is the simplest conforming implementation of the MCP Streamable HTTP
+// transport: no SSE streaming, just request → response JSON.
+//
+// The client (Antigravity) is configured via:
+//   "blackbox": { "serverUrl": "http://127.0.0.1:8768/mcp" }
+
+async fn mcp_http_handler(
+    State(state): State<DaemonState>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    use blackbox_core::protocol::{error_codes, JsonRpcRequest, JsonRpcResponse};
+    use axum::http::header;
+
+    let body_str = String::from_utf8_lossy(&body);
+    eprintln!("BlackBox MCP-HTTP: recv {}", body_str);
+
+    let req: JsonRpcRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("BlackBox MCP-HTTP: parse error");
+            let resp = JsonRpcResponse::error(None, error_codes::PARSE_ERROR, "Parse error".into());
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_string(&resp).unwrap_or_default(),
+            );
+        }
+    };
+
+    let id = req.id.clone();
+    let is_notification = id.is_none();
+
+    let response: Option<JsonRpcResponse> = match req.method.as_str() {
+        "initialize" => Some(JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {}, "logging": {} },
+                "serverInfo": { "name": "blackbox", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        )),
+        "notifications/initialized" => None,
+        "ping" => Some(JsonRpcResponse::success(id, serde_json::json!({}))),
+        "tools/list" => {
+            // Re-use the same list as the stdio transport
+            let list_resp = crate::mcp::handle_tools_list_value();
+            Some(JsonRpcResponse::success(id, list_resp))
+        }
+        "tools/call" => {
+            let resp = crate::mcp::tools::handle_tools_call(id, req.params, &state).await;
+            Some(resp)
+        }
+        _ => {
+            if is_notification {
+                None
+            } else {
+                Some(JsonRpcResponse::error(
+                    id,
+                    error_codes::METHOD_NOT_FOUND,
+                    format!("Method not found: {}", req.method),
+                ))
+            }
+        }
+    };
+
+    match response {
+        Some(resp) => {
+            let body = serde_json::to_string(&resp).unwrap_or_default();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+        }
+        // Notifications → 202 Accepted with empty body
+        None => (StatusCode::ACCEPTED, [(header::CONTENT_TYPE, "application/json")], String::new()),
+    }
+}
+

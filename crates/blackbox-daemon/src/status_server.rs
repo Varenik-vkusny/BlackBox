@@ -10,8 +10,13 @@ use crate::scanners::{git::scan_git, manifests::scan_manifests};
 
 pub async fn run_status_server(buf: SharedBuffer, cwd: PathBuf, start_time: Instant, port: u16) {
     let addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&addr).await
-        .unwrap_or_else(|e| panic!("Status server failed to bind {addr}: {e}"));
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Status server failed to bind {addr}: {e}. Internal API will be unavailable.");
+            return;
+        }
+    };
 
     loop {
         match listener.accept().await {

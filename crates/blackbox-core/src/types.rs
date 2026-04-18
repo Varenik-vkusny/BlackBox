@@ -109,6 +109,9 @@ pub struct LogLine {
     pub text: String,
     /// Milliseconds since the Unix epoch (UTC).
     pub timestamp_ms: u64,
+    /// VS Code terminal name (e.g. "bash", "Python Debug"). None for injected/shell-hook lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_terminal: Option<String>,
 }
 
 /// Status snapshot returned by the daemon's status server (port 8766).
@@ -129,4 +132,16 @@ pub struct ManifestInfo {
     pub manifest_type: ProjectKind,
     pub name: String,
     pub version: String,
+}
+
+/// A single git commit with lightweight metadata (no diffs — token-efficient).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp_iso: String,
+    pub changed_files: Vec<String>,
+    pub insertions: u32,
+    pub deletions: u32,
 }

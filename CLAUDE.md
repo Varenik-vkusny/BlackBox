@@ -31,7 +31,7 @@
 ## Phase Status
 - **Phase 1**: ✅ Complete (MVP daemon + VS Code bridge + sandbox)
 - **Phase 2**: ✅ Complete (compression, Docker monitoring, smart diffs — 7 MCP tools total)
-- **Phase 3**: OS-level PTY interception, PII masking (not started)
+- **Phase 3**: ✅ Complete (PII masker + entropy scanner, ANSI state machine, typed context, 2 new MCP tools, shell hooks, React lab UI)
 
 ## Cargo Workspace Pattern
 - Workspace root: `[workspace.package]` with version, edition = "2021", rust-version = "1.77"
@@ -129,6 +129,101 @@
   - **Each response includes `fallback_source` field** so AI learns which source is most useful for specific parts of project
 - **Intersection pattern for diffs**: Extract files from stack traces, cross-reference with dirty git files (not all project files) for surgical precision
 - **Docker availability signal**: `docker_available: true` + empty events = connected but no errors; `docker_available: false` = not reachable (triggers fallback)
+
+## Phase 3 Diagnostic Fixes (Session 2026-04-18)
+
+### Windows Path Normalization Bug (CRITICAL)
+- **Pattern**: Path::canonicalize() returns `\\?\C:\...` on Windows; cwd may be plain `C:\...`
+- **Impact**: strip_prefix(cwd) fails on Windows when comparing diff files to git changed files
+- **Fix**: Canonicalize both paths: `let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());` before strip_prefix
+- **Location**: `scanners/git.rs` normalize_path() function; also in `mcp/tools.rs` get_contextual_diff intersection
+
+### Untracked Files in git diff (CRITICAL for Phase 3)
+- **Pattern**: `git diff HEAD` doesn't show untracked files; diff shows "No changed lines intersected"
+- **Fix**: Add `git ls-files --others --exclude-standard` to get_changed_files(); in get_diff_hunks, fallback to `git diff --no-index -- /dev/null <file>` for files not in HEAD diff
+- **Location**: `scanners/git.rs` get_changed_files() and get_diff_hunks(); results are all green (added lines)
+
+### Stack Trace Parser Ordering (Node.js catches Java/Python)
+- **Pattern**: Node.js parser contains("Error: ") matches Python ConnectionError and Java exception messages; consumes wrong frames
+- **Fix**: Replace .contains() with is_nodejs_error_type() exhaustive enum (Error, TypeError, ReferenceError, SyntaxError, RangeError, InternalError, AggregateError)
+- **Also fix**: Python parser must return (trace, next_i) tuple; callers use returned next_i not frames.len() magic
+- **Location**: `scanners/stacktrace.rs` try_parse_nodejs, is_nodejs_error_type(), try_parse_python signature
+
+### Python Single-Frame Stack Traces
+- **Pattern**: Python errors with 1 frame (e.g., NameError: x not defined) rejected by min_frames < 2 check
+- **Fix**: Change `if frames.len() < 2` to `if frames.is_empty()` in try_parse_python
+- **Location**: `scanners/stacktrace.rs` try_parse_python, line ~120
+
+### inject_log Multiline Support
+- **Pattern**: Custom payload with newlines sent as single LogLine; stack trace parser can't detect multi-line traces
+- **Fix**: Split on '\n', call push_line_and_drain for each (not just push_line); updates both buffer and Drain state
+- **Location**: `admin_api.rs` inject_log handler, `buffer.rs` push_line_and_drain function
+
+## Phase 3 Architecture Patterns
+
+### ANSI State Machine (`scanners/ansi.rs`)
+- Stateful parser: Normal → Esc → Csi/Osc states; handles split sequences across buffer boundaries
+- Use for line-by-line input (stateless version ok); state persistence needed for streaming input
+- Covers: CSI color codes (\x1b[31m), OSC terminal titles (\x1b]...\x07), charset designate (\x1b(B), BS/CR discard
+
+### PII Masker with Entropy (`pii_masker.rs`)
+- Regex patterns (OnceLock for compile-once): email, JWT (eyJ...), Bearer, CC (Luhn), password=value, AKIA* keys
+- Entropy scanner: Shannon entropy > 4.5 bits/char AND len ≥ 20 AND !http && !:// → mask as <SECRET_MASKED>
+- Applied in push_line AFTER ANSI strip (order matters: strip first, then mask)
+
+### Typed Context System (`typed_context.rs`)
+- Wraps untrusted terminal output: `<terminal_output source="..." untrusted="true" pii_masked="true">...</terminal_output>`
+- Sanitizes XML: escapes </terminal_output>, <script, <iframe, <object to prevent injection
+- Used in mcp/tools.rs for all output responses (signals to Claude that content is passive data, not instructions)
+
+### New MCP Tools
+- `get_postmortem(minutes: 1-1440)` - timeline analysis with error spikes by minute, stack traces, Docker events within window
+- `get_correlated_errors(window_secs: u64)` - cross-references terminal errors with Docker events within time window; returns correlation list + fallback_source field
+- Both tools follow graceful fallback pattern: primary data → compressed_errors → terminal_buffer → "none"
+
+### Shell Hooks Integration
+- **bash**: `trap '__blackbox_preexec' DEBUG` sending `$ <command>` via `/dev/tcp/$BLACKBOX_HOST:$BLACKBOX_PORT`
+- **zsh**: `preexec()` hook, same mechanism
+- **PowerShell**: PSReadLine key handler with persistent TcpClient for Enter key capture
+- Requires: cwd contains shell-hooks/, users source in ~/.bashrc/~/.zshrc/$PROFILE with BLACKBOX_HOST/PORT env vars
+
+## BlackBox Lab UI (Phase 3 React Frontend)
+
+### Design System
+- Theme: OLED dark (#0F172A bg, #22C55E CTA, accent tokens: --accent-cyan/red/orange/green)
+- Typography: JetBrains Mono body + Inter headings; 16px base, line-height 1.5
+- Token pattern: CSS custom properties (--text-primary, --border, --accent-*) in index.css
+
+### Component Architecture
+- `LogExplorer`: 4 tabs (Raw, Compressed, Docker, Postmortem) with tab-btn/.tab-row style classes
+- Tab state preserved via activeTab useState; scroll position preserved if scroll ≥ content_len - 1
+- `InjectionStation`: Textarea (not input) for multiline; Ctrl+Enter to inject; line counter display
+- `Header`: uptime display (formatUptime helper), dirty file count, status indicator (offline/nominal/errors)
+
+### Integration with Daemon API
+- Polling interval: 3s (balance between responsiveness and load)
+- Endpoints: /api/status (uptime/git), /api/terminal, /api/compressed, /api/docker, /api/postmortem, /api/correlated, /api/inject, /api/clear
+- Error handling: daemonOnline state; offline UI gracefully degrades (show "Daemon offline" message, buttons disabled)
+
+## Phase 3 Testing & Verification
+
+### Cargo Build
+- Full workspace: `cargo build --workspace`; check for `error[` lines only (warnings acceptable for this phase)
+- Run daemon: `cargo run -p blackbox-daemon -- --cwd .` (verify starts without panic)
+
+### Manual Test Scenarios (blackbox-lab)
+- Rust panic injection → stack trace appears in Analyzed tab with rust badge
+- Python traceback (single frame) → appears in Analyzed (previously missed due to min_frames < 2)
+- Java exception → correct java badge (not nodejs; requires parser ordering fix)
+- PII payload → email/JWT/card/token all masked in Raw tab
+- Untracked file error → Contextual Diff shows diff hunks (requires Windows path fix + git ls-files)
+- Postmortem request → timeline shows error spikes by minute_offset
+- Large log block paste → textarea handles multiline; Ctrl+Enter injects as separate lines
+
+### Known Test Blockers
+- Docker monitoring requires docker daemon running; without it, /api/docker returns `docker_available: false` (not error)
+- Windows: Path canonicalization critical; always test git diffs with untracked files on Windows
+- Java vs Node.js detection fragile; test with real exception types not generic "Error:" strings
 
 ## Diagnostics & Gotchas
 

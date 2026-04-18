@@ -27,37 +27,56 @@ pub async fn handle_tools_call(
         v => v,
     };
 
-    match tool_name.as_str() {
-        "get_snapshot" => get_snapshot(id, state).await,
-        "get_terminal_buffer" => get_terminal_buffer(id, state, &args),
-        "get_project_metadata" => get_project_metadata(id, state).await,
-        "read_file" => read_file(id, state, &args),
-        "get_compressed_errors" => get_compressed_errors(id, state, &args).await,
-        "get_contextual_diff" => get_contextual_diff(id, state).await,
-        "get_container_logs" => get_container_logs(id, state, &args).await,
-        "get_postmortem" => get_postmortem(id, state, &args).await,
-        "get_correlated_errors" => get_correlated_errors(id, state, &args).await,
-        _ => JsonRpcResponse::error(
+    let result = match tool_name.as_str() {
+        "get_snapshot" => get_snapshot(state).await,
+        "get_terminal_buffer" => get_terminal_buffer(state, &args),
+        "get_project_metadata" => get_project_metadata(state).await,
+        "read_file" => read_file(state, &args),
+        "get_compressed_errors" => get_compressed_errors(state, &args).await,
+        "get_contextual_diff" => get_contextual_diff(state).await,
+        "get_container_logs" => get_container_logs(state, &args).await,
+        "get_postmortem" => get_postmortem(state, &args).await,
+        "get_correlated_errors" => get_correlated_errors(state, &args).await,
+        "get_recent_commits" => get_recent_commits(state, &args).await,
+        "watch_log_file" => watch_log_file(state, &args),
+        "get_watched_files" => get_watched_files(state),
+        "get_http_errors" => get_http_errors(state, &args),
+        _ => return JsonRpcResponse::error(
             id,
             error_codes::METHOD_NOT_FOUND,
             format!("Unknown tool: {tool_name}"),
         ),
-    }
+    };
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }
+            ],
+            "isError": false
+        }),
+    )
 }
 
 // ── Shared data collectors (used by primary handlers and fallbacks) ──────────
 
-fn collect_terminal_buffer_data(state: &DaemonState, n: usize) -> Value {
-    let lines = get_last_n(&state.buf, n);
+fn collect_terminal_buffer_data(state: &DaemonState, n: usize, terminal: Option<&str>) -> Value {
+    let terminals = crate::buffer::list_terminals(&state.buf);
+    let lines = get_last_n(&state.buf, n, terminal);
     let content: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-    let output = crate::typed_context::wrap_untrusted(&content, "vscode_bridge");
-    json!({ "content": output, "lines_returned": lines.len() })
+    let source = terminal.unwrap_or("vscode_bridge");
+    let output = crate::typed_context::wrap_untrusted(&content, source);
+    json!({ "content": output, "lines_returned": lines.len(), "terminals": terminals })
 }
 
 async fn collect_compressed_errors_data(state: &DaemonState, limit: usize) -> Value {
     let clusters = get_error_clusters(&state.drain, limit);
     let total = total_error_line_count(&state.drain);
-    let lines = get_last_n(&state.buf, 500);
+    let lines = get_last_n(&state.buf, 500, None);
     let stack_traces = tokio::task::spawn_blocking(move || extract_stack_traces(&lines))
         .await
         .unwrap_or_default();
@@ -70,7 +89,7 @@ async fn collect_compressed_errors_data(state: &DaemonState, limit: usize) -> Va
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
-async fn get_snapshot(id: Option<Value>, state: &DaemonState) -> JsonRpcResponse {
+async fn get_snapshot(state: &DaemonState) -> Value {
     let uptime_secs = state.start_time.elapsed().as_secs();
     let cwd = state.cwd.clone();
     let (branch, dirty_files, project_type) =
@@ -86,40 +105,35 @@ async fn get_snapshot(id: Option<Value>, state: &DaemonState) -> JsonRpcResponse
         .await
         .unwrap_or_else(|_| ("unknown".into(), 0, "unknown".into()));
 
-    JsonRpcResponse::success(
-        id,
-        json!({
-            "daemon_uptime_secs": uptime_secs,
-            "project_type": project_type,
-            "git_branch": branch,
-            "git_dirty_files": dirty_files,
-            "buffer_lines": buffer_len(&state.buf),
-            "has_recent_errors": has_recent_errors(&state.buf)
-        }),
-    )
+    json!({
+        "daemon_uptime_secs": uptime_secs,
+        "project_type": project_type,
+        "git_branch": branch,
+        "git_dirty_files": dirty_files,
+        "buffer_lines": buffer_len(&state.buf),
+        "has_recent_errors": has_recent_errors(&state.buf)
+    })
 }
 
-fn get_terminal_buffer(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcResponse {
+fn get_terminal_buffer(state: &DaemonState, args: &Value) -> Value {
     let n = args["lines"].as_u64().unwrap_or(100).min(500) as usize;
-    let data = collect_terminal_buffer_data(state, n);
+    let terminal = args["terminal"].as_str();
+    let data = collect_terminal_buffer_data(state, n, terminal);
     let lines_returned = data["lines_returned"].as_u64().unwrap_or(0);
 
     if lines_returned == 0 {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "content": "",
-                "lines_returned": 0,
-                "fallback_source": "none",
-                "fallback_reason": "terminal buffer is empty — no data has been captured yet"
-            }),
-        );
+        return json!({
+            "content": "",
+            "lines_returned": 0,
+            "fallback_source": "none",
+            "fallback_reason": "terminal buffer is empty — no data has been captured yet"
+        });
     }
 
-    JsonRpcResponse::success(id, data)
+    data
 }
 
-async fn get_project_metadata(id: Option<Value>, state: &DaemonState) -> JsonRpcResponse {
+async fn get_project_metadata(state: &DaemonState) -> Value {
     let cwd = state.cwd.clone();
     let (manifests, env_keys) = tokio::task::spawn_blocking(move || {
         let manifests = crate::scanners::manifests::scan_manifests(&cwd);
@@ -129,31 +143,31 @@ async fn get_project_metadata(id: Option<Value>, state: &DaemonState) -> JsonRpc
     .await
     .unwrap_or_default();
 
-    JsonRpcResponse::success(id, json!({ "manifests": manifests, "env_keys": env_keys }))
+    json!({ "manifests": manifests, "env_keys": env_keys })
 }
 
-fn read_file(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcResponse {
+fn read_file(state: &DaemonState, args: &Value) -> Value {
     let path_str = match args["path"].as_str() {
         Some(p) => p,
-        None => return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, "Missing path".into()),
+        None => return json!({ "error": "Missing path" }),
     };
 
     let requested = state.cwd.join(path_str);
     let canonical_cwd = match std::fs::canonicalize(&state.cwd) {
         Ok(p) => p,
-        Err(_) => return JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, "Cannot resolve cwd".into()),
+        Err(_) => return json!({ "error": "Cannot resolve cwd" }),
     };
     let canonical_req = match std::fs::canonicalize(&requested) {
         Ok(p) => p,
-        Err(_) => return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, format!("File not found: {path_str}")),
+        Err(_) => return json!({ "error": format!("File not found: {path_str}") }),
     };
     if !canonical_req.starts_with(&canonical_cwd) {
-        return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, "Path traversal not allowed".into());
+        return json!({ "error": "Path traversal not allowed" });
     }
 
     let content = match std::fs::read_to_string(&canonical_req) {
         Ok(c) => c,
-        Err(e) => return JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, format!("Read error: {e}")),
+        Err(e) => return json!({ "error": format!("Read error: {e}") }),
     };
 
     let lines: Vec<&str> = content.lines().collect();
@@ -161,19 +175,18 @@ fn read_file(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcRes
     let to = args["to_line"].as_u64().map(|n| (n as usize).min(lines.len())).unwrap_or(lines.len());
     let slice = lines[from.min(lines.len())..to.min(lines.len())].join("\n");
 
-    JsonRpcResponse::success(id, json!({
+    json!({
         "path": path_str,
         "content": slice,
         "from_line": from + 1,
         "to_line": to
-    }))
+    })
 }
 
 async fn get_compressed_errors(
-    id: Option<Value>,
     state: &DaemonState,
     args: &Value,
-) -> JsonRpcResponse {
+) -> Value {
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
     let data = collect_compressed_errors_data(state, limit).await;
 
@@ -182,41 +195,35 @@ async fn get_compressed_errors(
 
     if !has_clusters && !has_traces {
         // Fallback: return raw terminal buffer so AI has something to work with.
-        let buf_data = collect_terminal_buffer_data(state, 100);
+        let buf_data = collect_terminal_buffer_data(state, 100, None);
         let lines_returned = buf_data["lines_returned"].as_u64().unwrap_or(0);
 
         if lines_returned == 0 {
-            return JsonRpcResponse::success(
-                id,
-                json!({
-                    "clusters": [],
-                    "stack_traces": [],
-                    "total_error_lines": 0,
-                    "fallback_source": "none",
-                    "fallback_reason": "no error clusters or stack traces found, and terminal buffer is empty — no data captured yet"
-                }),
-            );
-        }
-
-        return JsonRpcResponse::success(
-            id,
-            json!({
+            return json!({
                 "clusters": [],
                 "stack_traces": [],
-                "total_error_lines": data["total_error_lines"],
-                "fallback_source": "terminal_buffer",
-                "fallback_reason": "no error clusters or stack traces found in drain — showing raw terminal buffer instead; consider injecting logs via the terminal bridge",
-                "terminal_buffer": buf_data
-            }),
-        );
+                "total_error_lines": 0,
+                "fallback_source": "none",
+                "fallback_reason": "no error clusters or stack traces found, and terminal buffer is empty — no data captured yet"
+            });
+        }
+
+        return json!({
+            "clusters": [],
+            "stack_traces": [],
+            "total_error_lines": data["total_error_lines"],
+            "fallback_source": "terminal_buffer",
+            "fallback_reason": "no error clusters or stack traces found in drain — showing raw terminal buffer instead; consider injecting logs via the terminal bridge",
+            "terminal_buffer": buf_data
+        });
     }
 
-    JsonRpcResponse::success(id, data)
+    data
 }
 
-async fn get_contextual_diff(id: Option<Value>, state: &DaemonState) -> JsonRpcResponse {
+async fn get_contextual_diff(state: &DaemonState) -> Value {
     let cwd = state.cwd.clone();
-    let lines = get_last_n(&state.buf, 500);
+    let lines = get_last_n(&state.buf, 500, None);
 
     let diff_result = tokio::task::spawn_blocking(move || {
         let traces = extract_stack_traces(&lines);
@@ -247,19 +254,16 @@ async fn get_contextual_diff(id: Option<Value>, state: &DaemonState) -> JsonRpcR
 
     let (hunks, relevant, truncated) = match diff_result {
         Ok(v) => v,
-        Err(_) => return JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, "Diff failed".into()),
+        Err(_) => return json!({ "error": "Diff failed" }),
     };
 
     if !hunks.is_empty() {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "diff_hunks": hunks,
-                "files_cross_referenced": relevant,
-                "truncated": truncated,
-                "fallback_source": "none"
-            }),
-        );
+        return json!({
+            "diff_hunks": hunks,
+            "files_cross_referenced": relevant,
+            "truncated": truncated,
+            "fallback_source": "none"
+        });
     }
 
     // Diff was empty — fall back to compressed errors for useful context.
@@ -268,52 +272,43 @@ async fn get_contextual_diff(id: Option<Value>, state: &DaemonState) -> JsonRpcR
     let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
 
     if has_clusters || has_traces {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "diff_hunks": [],
-                "files_cross_referenced": relevant,
-                "truncated": false,
-                "fallback_source": "compressed_errors",
-                "fallback_reason": "no stack trace files matched dirty git files — showing error clusters and stack traces instead",
-                "clusters": err_data["clusters"],
-                "stack_traces": err_data["stack_traces"],
-                "total_error_lines": err_data["total_error_lines"]
-            }),
-        );
+        return json!({
+            "diff_hunks": [],
+            "files_cross_referenced": relevant,
+            "truncated": false,
+            "fallback_source": "compressed_errors",
+            "fallback_reason": "no stack trace files matched dirty git files — showing error clusters and stack traces instead",
+            "clusters": err_data["clusters"],
+            "stack_traces": err_data["stack_traces"],
+            "total_error_lines": err_data["total_error_lines"]
+        });
     }
 
     // Last resort: raw terminal buffer.
-    let buf_data = collect_terminal_buffer_data(state, 100);
+    let buf_data = collect_terminal_buffer_data(state, 100, None);
     let lines_returned = buf_data["lines_returned"].as_u64().unwrap_or(0);
 
     if lines_returned > 0 {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "diff_hunks": [],
-                "files_cross_referenced": relevant,
-                "truncated": false,
-                "fallback_source": "terminal_buffer",
-                "fallback_reason": "no diff context and no error clusters found — showing raw terminal buffer; check if logs are flowing via the VS Code terminal bridge",
-                "terminal_buffer": buf_data
-            }),
-        );
+        return json!({
+            "diff_hunks": [],
+            "files_cross_referenced": relevant,
+            "truncated": false,
+            "fallback_source": "terminal_buffer",
+            "fallback_reason": "no diff context and no error clusters found — showing raw terminal buffer; check if logs are flowing via the VS Code terminal bridge",
+            "terminal_buffer": buf_data
+        });
     }
 
-    JsonRpcResponse::success(
-        id,
-        json!({
-            "diff_hunks": [],
-            "files_cross_referenced": [],
-            "truncated": false,
-            "fallback_source": "none",
-            "fallback_reason": "no diff context, no error clusters, and terminal buffer is empty — no data available yet"
-        }),
-    )
+    json!({
+        "diff_hunks": [],
+        "files_cross_referenced": [],
+        "truncated": false,
+        "fallback_source": "none",
+        "fallback_reason": "no diff context, no error clusters, and terminal buffer is empty — no data available yet"
+    })
 }
 
-async fn get_container_logs(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcResponse {
+async fn get_container_logs(state: &DaemonState, args: &Value) -> Value {
     let container_id = args["container_id"].as_str();
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
 
@@ -326,29 +321,23 @@ async fn get_container_logs(id: Option<Value>, state: &DaemonState, args: &Value
     };
 
     if docker_available && !events.is_empty() {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "containers": containers,
-                "events": events,
-                "docker_available": true,
-                "fallback_source": "none"
-            }),
-        );
+        return json!({
+            "containers": containers,
+            "events": events,
+            "docker_available": true,
+            "fallback_source": "none"
+        });
     }
 
     // Docker running but no errors stored yet — still report correctly.
     if docker_available {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "containers": containers,
-                "events": [],
-                "docker_available": true,
-                "fallback_source": "none",
-                "fallback_reason": "Docker is connected and containers are tracked, but no ERROR/WARN/FATAL events have been captured yet"
-            }),
-        );
+        return json!({
+            "containers": containers,
+            "events": [],
+            "docker_available": true,
+            "fallback_source": "none",
+            "fallback_reason": "Docker is connected and containers are tracked, but no ERROR/WARN/FATAL events have been captured yet"
+        });
     }
 
     // Docker not reachable — fall back to compressed errors then terminal buffer.
@@ -357,53 +346,44 @@ async fn get_container_logs(id: Option<Value>, state: &DaemonState, args: &Value
     let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
 
     if has_clusters || has_traces {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "containers": [],
-                "events": [],
-                "docker_available": false,
-                "fallback_source": "compressed_errors",
-                "fallback_reason": "Docker is not reachable — showing terminal error clusters instead; start Docker Desktop if container monitoring is needed",
-                "clusters": err_data["clusters"],
-                "stack_traces": err_data["stack_traces"],
-                "total_error_lines": err_data["total_error_lines"]
-            }),
-        );
-    }
-
-    let buf_data = collect_terminal_buffer_data(state, 100);
-    let lines_returned = buf_data["lines_returned"].as_u64().unwrap_or(0);
-
-    if lines_returned > 0 {
-        return JsonRpcResponse::success(
-            id,
-            json!({
-                "containers": [],
-                "events": [],
-                "docker_available": false,
-                "fallback_source": "terminal_buffer",
-                "fallback_reason": "Docker is not reachable and no error clusters found — showing raw terminal buffer",
-                "terminal_buffer": buf_data
-            }),
-        );
-    }
-
-    JsonRpcResponse::success(
-        id,
-        json!({
+        return json!({
             "containers": [],
             "events": [],
             "docker_available": false,
-            "fallback_source": "none",
-            "fallback_reason": "Docker is not reachable and terminal buffer is empty — no data available"
-        }),
-    )
+            "fallback_source": "compressed_errors",
+            "fallback_reason": "Docker is not reachable — showing terminal error clusters instead; start Docker Desktop if container monitoring is needed",
+            "clusters": err_data["clusters"],
+            "stack_traces": err_data["stack_traces"],
+            "total_error_lines": err_data["total_error_lines"]
+        });
+    }
+
+    let buf_data = collect_terminal_buffer_data(state, 100, None);
+    let lines_returned = buf_data["lines_returned"].as_u64().unwrap_or(0);
+
+    if lines_returned > 0 {
+        return json!({
+            "containers": [],
+            "events": [],
+            "docker_available": false,
+            "fallback_source": "terminal_buffer",
+            "fallback_reason": "Docker is not reachable and no error clusters found — showing raw terminal buffer",
+            "terminal_buffer": buf_data
+        });
+    }
+
+    json!({
+        "containers": [],
+        "events": [],
+        "docker_available": false,
+        "fallback_source": "none",
+        "fallback_reason": "Docker is not reachable and terminal buffer is empty — no data available"
+    })
 }
 
 // ── Phase 3 tools ─────────────────────────────────────────────────────────────
 
-pub async fn get_postmortem(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcResponse {
+pub async fn get_postmortem(state: &DaemonState, args: &Value) -> Value {
     let minutes = args["minutes"].as_u64().unwrap_or(30).clamp(1, 1440);
     let now = crate::buffer::now_ms();
     let cutoff_ms = now.saturating_sub(minutes * 60 * 1_000);
@@ -461,20 +441,17 @@ pub async fn get_postmortem(id: Option<Value>, state: &DaemonState, args: &Value
             .unwrap_or_default()
     };
 
-    JsonRpcResponse::success(
-        id,
-        json!({
-            "window_minutes": minutes,
-            "total_lines": lines.len(),
-            "timeline": timeline,
-            "docker_events_in_window": docker_in_window,
-            "stack_traces": traces,
-            "fallback_source": "none"
-        }),
-    )
+    json!({
+        "window_minutes": minutes,
+        "total_lines": lines.len(),
+        "timeline": timeline,
+        "docker_events_in_window": docker_in_window,
+        "stack_traces": traces,
+        "fallback_source": "none"
+    })
 }
 
-pub async fn get_correlated_errors(id: Option<Value>, state: &DaemonState, args: &Value) -> JsonRpcResponse {
+pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
     let window_secs = args["window_secs"].as_u64().unwrap_or(5);
     let limit = args["limit"].as_u64().unwrap_or(20) as usize;
 
@@ -524,19 +501,125 @@ pub async fn get_correlated_errors(id: Option<Value>, state: &DaemonState, args:
         })
         .collect();
 
-    let has_correlations = correlations.iter().any(|c| {
+    let has_docker_correlations = correlations.iter().any(|c| {
         c["correlated_docker_events"]
             .as_array()
             .map_or(false, |a| !a.is_empty())
     });
 
-    JsonRpcResponse::success(
-        id,
-        json!({
-            "correlations": correlations,
-            "has_cross_source_correlations": has_correlations,
-            "window_secs": window_secs,
-            "fallback_source": if has_correlations { "none" } else { "terminal_only" }
-        }),
-    )
+    // Also correlate with HTTP errors (third source)
+    let all_http = crate::http_store::get_http_events(&state.http_store, 500);
+    let correlations: Vec<Value> = correlations
+        .into_iter()
+        .map(|mut c| {
+            let ts = c["timestamp_ms"].as_u64().unwrap_or(0);
+            let nearby_http: Vec<Value> = all_http
+                .iter()
+                .filter(|he| {
+                    let diff = if he.timestamp_ms > ts { he.timestamp_ms - ts } else { ts - he.timestamp_ms };
+                    diff <= window_secs * 1_000
+                })
+                .map(|he| json!({"method": he.method, "url": he.url, "status": he.status, "latency_ms": he.latency_ms}))
+                .collect();
+            if !nearby_http.is_empty() {
+                c["correlated_http_errors"] = json!(nearby_http);
+            }
+            c
+        })
+        .collect();
+
+    let has_http_correlations = correlations.iter().any(|c| {
+        c["correlated_http_errors"]
+            .as_array()
+            .map_or(false, |a| !a.is_empty())
+    });
+    let has_correlations = has_docker_correlations || has_http_correlations;
+
+    json!({
+        "correlations": correlations,
+        "has_cross_source_correlations": has_correlations,
+        "window_secs": window_secs,
+        "fallback_source": if has_correlations { "none" } else { "terminal_only" }
+    })
+}
+
+fn watch_log_file(state: &DaemonState, args: &Value) -> Value {
+    let path_str = match args["path"].as_str() {
+        Some(p) => p,
+        None => return json!({ "error": "missing 'path' argument" }),
+    };
+
+    let abs_path = if std::path::Path::new(path_str).is_absolute() {
+        std::path::PathBuf::from(path_str)
+    } else {
+        state.cwd.join(path_str)
+    };
+
+    if !abs_path.exists() {
+        return json!({ "error": format!("file not found: {path_str}") });
+    }
+
+    let mut list = state.watch_list.write().unwrap();
+    if list.contains(&abs_path) {
+        return json!({ "status": "already_watching", "path": path_str });
+    }
+    list.push(abs_path);
+    json!({ "status": "watching", "path": path_str })
+}
+
+fn get_watched_files(state: &DaemonState) -> Value {
+    let list = state.watch_list.read().unwrap();
+    let paths: Vec<String> = list
+        .iter()
+        .filter_map(|p| p.strip_prefix(&state.cwd).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+        .collect();
+    json!({ "watched_files": paths, "count": paths.len() })
+}
+
+fn get_http_errors(state: &DaemonState, args: &Value) -> Value {
+    let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+    let events = crate::http_store::get_http_events(&state.http_store, limit);
+
+    if events.is_empty() {
+        return json!({
+            "events": [],
+            "total": 0,
+            "proxy_port": 8769,
+            "usage": "Set HTTP_PROXY=http://127.0.0.1:8769 (or X-Proxy-Target header) to route HTTP requests through BlackBox. Only 4xx/5xx responses are logged.",
+            "fallback_source": "none"
+        });
+    }
+
+    json!({
+        "events": events,
+        "total": events.len(),
+        "proxy_port": 8769
+    })
+}
+
+pub async fn get_recent_commits(state: &DaemonState, args: &Value) -> Value {
+    let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
+    let path_filter = args["path_filter"].as_str();
+    let cwd = state.cwd.clone();
+    let path_owned = path_filter.map(|s| s.to_string());
+
+    let commits = tokio::task::spawn_blocking(move || {
+        crate::scanners::git::get_recent_commits(&cwd, limit, path_owned.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+
+    if commits.is_empty() {
+        return json!({
+            "commits": [],
+            "total": 0,
+            "fallback_source": "none",
+            "fallback_reason": "No commits found — either not a git repo or path_filter matched nothing"
+        });
+    }
+
+    json!({
+        "commits": commits,
+        "total": commits.len()
+    })
 }

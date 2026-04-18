@@ -3,10 +3,15 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
+    #[serde(default = "default_jsonrpc")]
     pub jsonrpc: String,
     pub id: Option<Value>,
     pub method: String,
     pub params: Option<Value>,
+}
+
+fn default_jsonrpc() -> String {
+    "2.0".into()
 }
 
 #[derive(Debug, Serialize)]

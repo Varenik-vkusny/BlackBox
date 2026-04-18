@@ -34,12 +34,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const listener = windowEx.onDidWriteTerminalData((event: TerminalDataWriteEvent) => {
         if (socket && !socket.destroyed) {
-            // Send raw data — daemon handles ANSI stripping
-            socket.write(event.data);
-            // Ensure newline termination for line-based reading
-            if (!event.data.endsWith('\n')) {
-                socket.write('\n');
-            }
+            // Send JSON envelope so daemon can tag lines with the terminal name.
+            // serde_json will unescape \n inside "d", giving per-line granularity.
+            const payload = JSON.stringify({ t: event.terminal.name, d: event.data }) + '\n';
+            socket.write(payload);
         }
     });
 

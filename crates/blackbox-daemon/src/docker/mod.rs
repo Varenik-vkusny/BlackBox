@@ -2,11 +2,13 @@ pub mod demux;
 pub mod error_store;
 pub mod log_filter;
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bollard::container::{ListContainersOptions, LogOutput, LogsOptions};
 use bollard::Docker;
 use futures_util::StreamExt;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use blackbox_core::types::{ErrorEvent, ErrorSource};
@@ -16,6 +18,7 @@ use error_store::SharedErrorStore;
 use log_filter::should_keep;
 
 const RETRY_INTERVAL_SECS: u64 = 10;
+const DISCOVERY_INTERVAL_SECS: u64 = 30;
 
 /// Background task: connect to Docker Engine and stream filtered error events.
 /// Silently retries every 10 seconds when Docker is unavailable.
@@ -44,42 +47,74 @@ async fn monitor_all_containers(
     docker: &Docker,
     store: &SharedErrorStore,
 ) -> Result<(), bollard::errors::Error> {
-    let containers = docker
-        .list_containers(Some(ListContainersOptions::<String> {
-            all: false, // running only
-            ..Default::default()
-        }))
-        .await?;
+    // Maps container_id → streaming task handle.
+    // Tasks are aborted when a container stops or Docker disconnects.
+    let mut tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
 
-    let mut tasks = Vec::new();
-    for container in containers {
-        let id = match container.id {
-            Some(id) => id,
-            None => continue,
+    loop {
+        let containers = match docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: false,
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                for (_, handle) in tasks.drain() {
+                    handle.abort();
+                }
+                return Err(e);
+            }
         };
-        let name = container
-            .names
-            .and_then(|names| names.into_iter().next())
-            .unwrap_or_else(|| id.clone());
-        let display_name = name.trim_start_matches('/').to_string();
 
-        let docker_clone = docker.clone();
-        let store_clone = store.clone();
+        // Build set of currently running IDs.
+        let running: std::collections::HashSet<String> = containers
+            .iter()
+            .filter_map(|c| c.id.clone())
+            .collect();
 
-        // Each container gets its own persistent loop — only this stream
-        // restarts on failure, not all containers.
-        let task = tokio::spawn(async move {
-            loop {
-                stream_container_logs(&docker_clone, &id, &display_name, &store_clone).await;
-                // Stream ended (container stopped or error) — retry after brief wait.
-                sleep(Duration::from_secs(5)).await;
+        // Abort tasks for containers that stopped.
+        tasks.retain(|id, handle| {
+            if running.contains(id) {
+                true
+            } else {
+                handle.abort();
+                false
             }
         });
-        tasks.push(task);
-    }
 
-    futures_util::future::join_all(tasks).await;
-    Ok(())
+        // Spawn tasks for newly discovered containers.
+        for container in containers {
+            let id = match container.id {
+                Some(id) => id,
+                None => continue,
+            };
+            if tasks.contains_key(&id) {
+                continue;
+            }
+            let name = container
+                .names
+                .and_then(|names| names.into_iter().next())
+                .unwrap_or_else(|| id.clone());
+            let display_name = name.trim_start_matches('/').to_string();
+
+            let docker_clone = docker.clone();
+            let store_clone = store.clone();
+            let id_clone = id.clone();
+
+            let handle = tokio::spawn(async move {
+                loop {
+                    stream_container_logs(&docker_clone, &id_clone, &display_name, &store_clone)
+                        .await;
+                    sleep(Duration::from_secs(5)).await;
+                }
+            });
+            tasks.insert(id, handle);
+        }
+
+        sleep(Duration::from_secs(DISCOVERY_INTERVAL_SECS)).await;
+    }
 }
 
 async fn stream_container_logs(

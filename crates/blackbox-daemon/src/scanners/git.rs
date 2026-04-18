@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use blackbox_core::types::{ChangedFile, ChangeType, DiffHunk, HunkLine, HunkLineKind};
+use blackbox_core::types::{ChangedFile, ChangeType, CommitInfo, DiffHunk, HunkLine, HunkLineKind};
 
 /// Normalize a file path for cross-reference comparison.
 /// Strips leading `./`, converts `\` to `/`, makes absolute paths relative to cwd.
@@ -35,25 +35,24 @@ pub fn scan_git(cwd: &Path) -> (String, usize) {
         .map(|r| r.shorten().to_string())
         .unwrap_or_else(|| "HEAD (detached)".into());
 
-    let dirty = count_dirty_files(&repo);
+    let cwd = repo.work_dir().map(|p| p.to_path_buf()).unwrap_or_else(|| cwd.to_path_buf());
+    let dirty = count_dirty_files(&cwd);
     (branch, dirty)
 }
 
-fn count_dirty_files(repo: &gix::Repository) -> usize {
-    // Use gix index to count conflicted (non-Unconflicted stage) entries
-    // as a proxy for dirty/conflicted files. Returns 0 on any error — best-effort.
-    repo.index()
-        .ok()
-        .map(|idx| {
-            idx.entries()
-                .iter()
-                .filter(|e| {
-                    use gix::index::entry::Stage;
-                    e.stage() != Stage::Unconflicted
-                })
-                .count()
-        })
-        .unwrap_or(0)
+fn count_dirty_files(cwd: &Path) -> usize {
+    // Collect unique filenames from staged + unstaged diffs to deduplicate.
+    let mut files = std::collections::HashSet::new();
+    for args in [["diff", "--name-only", "HEAD"], ["diff", "--cached", "--name-only"]] {
+        if let Ok(out) = std::process::Command::new("git").args(args).current_dir(cwd).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if !line.trim().is_empty() {
+                    files.insert(line.to_string());
+                }
+            }
+        }
+    }
+    files.len()
 }
 
 /// List all uncommitted changed files (staged + unstaged) relative to HEAD.
@@ -258,4 +257,118 @@ fn parse_hunk_header(line: &str) -> (u32, u32) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     (old, new)
+}
+
+/// Fetch recent git commits with lightweight metadata (no diffs).
+/// Optionally filter to commits that touched a specific file path.
+/// Uses `git log --format=... --stat` to get per-commit stats in one pass.
+pub fn get_recent_commits(cwd: &Path, limit: usize, path_filter: Option<&str>) -> Vec<CommitInfo> {
+    // Custom format: each commit header is on one line, separated by a delimiter
+    // %x1f = ASCII unit separator (won't appear in normal text)
+    // Format: hash\x1fauthor\x1ftimestamp\x1fsubject
+    let format = "--format=%x00%H%x1f%an%x1f%aI%x1f%s";
+    let limit_str = limit.to_string();
+
+    let mut args = vec!["log", format, "-n", &limit_str, "--stat", "--stat-width=200"];
+    if let Some(path) = path_filter {
+        args.push("--");
+        args.push(path);
+    }
+
+    let output = match std::process::Command::new("git")
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_git_log_stat(&text)
+}
+
+/// Parse `git log --format=%x00%H%x1f%an%x1f%aI%x1f%s --stat` output.
+/// Commits are delimited by NUL (\x00) at the start of each header line.
+fn parse_git_log_stat(text: &str) -> Vec<CommitInfo> {
+    let mut commits: Vec<CommitInfo> = Vec::new();
+
+    // Split into commit blocks on \x00 (NUL byte before each header)
+    for block in text.split('\x00') {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+
+        let mut lines = block.lines();
+        let header = match lines.next() {
+            Some(h) => h,
+            None => continue,
+        };
+
+        // Parse header: hash\x1fauthor\x1ftimestamp\x1fsubject
+        let parts: Vec<&str> = header.splitn(4, '\x1f').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let hash = parts[0].trim().to_string();
+        let author = parts[1].to_string();
+        let timestamp_iso = parts[2].to_string();
+        let message = parts[3].to_string();
+
+        if hash.len() < 7 {
+            continue;
+        }
+
+        let mut changed_files: Vec<String> = Vec::new();
+        let mut insertions: u32 = 0;
+        let mut deletions: u32 = 0;
+
+        // Remaining lines are the --stat output:
+        // " src/foo.rs | 12 +++---"
+        // " 2 files changed, 8 insertions(+), 4 deletions(-)"
+        for stat_line in lines {
+            let trimmed = stat_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.contains("changed,") || trimmed.ends_with("changed") {
+                // Summary line: "N files changed, X insertions(+), Y deletions(-)"
+                if let Some(ins) = extract_stat_number(trimmed, "insertion") {
+                    insertions = ins;
+                }
+                if let Some(del) = extract_stat_number(trimmed, "deletion") {
+                    deletions = del;
+                }
+            } else if let Some(pipe_pos) = trimmed.rfind(" | ") {
+                // File stat line: "path/to/file.rs | 12 ++--"
+                let file_path = trimmed[..pipe_pos].trim().to_string();
+                if !file_path.is_empty() {
+                    changed_files.push(file_path);
+                }
+            }
+        }
+
+        commits.push(CommitInfo {
+            hash: hash[..7.min(hash.len())].to_string(),
+            message,
+            author,
+            timestamp_iso,
+            changed_files,
+            insertions,
+            deletions,
+        });
+    }
+
+    commits
+}
+
+fn extract_stat_number(line: &str, keyword: &str) -> Option<u32> {
+    // "8 insertions(+)" → Some(8)
+    let pos = line.find(keyword)?;
+    let before = line[..pos].trim();
+    // Walk back to find the number
+    let num_str: String = before.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let num_str: String = num_str.chars().rev().collect();
+    num_str.parse().ok()
 }
