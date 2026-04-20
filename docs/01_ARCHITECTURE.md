@@ -7,7 +7,7 @@
 ## High-level Overview
 BlackBox — это "бортовой самописец" (Flight Recorder) рабочего окружения разработчика. Он решает проблему **реактивности** существующих AI-агентов (таких как Claude Code или Cursor), которые видят только текущую сессию. 
 
-BlackBox **пассивно** агрегирует системные потоки (Terminal, Docker logs, Git state) в реальном времени. Это позволяет AI получить моментальный снимок того, что произошло *до* запроса или в *параллельных* процессах, избавляя разработчика от ручного копирования ошибок из терминала.
+BlackBox **пассивно** агрегирует системные потоки (Terminal, Docker logs, Git state, HTTP traffic) в реальном времени. Это позволяет AI получить моментальный снимок того, что произошло *до* запроса или в *параллельных* процессах, избавляя разработчика от ручного копирования ошибок из терминала.
 
 ## System Architecture
 Система построена как фоновый демон на Rust, взаимодействующий с внешним миром через несколько каналов.
@@ -20,53 +20,74 @@ graph TD
 
     subgraph "BlackBox Daemon (Rust)"
         TB["TCP Bridge (:8765)"]
+        HP["HTTP Proxy (:8769)"]
+        FW["File Watcher"]
         DS["DaemonState (Shared)"]
         RB["RingBuffer (5000 lines)"]
         DC["Drain Clustering"]
         ES["ErrorStore (Docker)"]
+        SS["StructuredStore (JSON)"]
+        HS["HttpStore (4xx/5xx)"]
         MCP["MCP Engine (stdio)"]
-        SS["Status Server (:8766)"]
-        AA["Admin API (:8768)"]
+        TC["TypedContext (XML Guard)"]
     end
 
     subgraph "External Systems"
         Docker["Docker Engine"]
         Git["Gitoxide (gix)"]
-    end
-
-    subgraph "AI Client"
-        Claude["Claude / Cursor"]
+        Network["Network Traffic"]
+        Files["External Logs"]
     end
 
     VS -- "Terminal Data (TCP)" --> TB
+    Network -- "HTTP Proxy" --> HP
+    Files -- "inotify/Notify" --> FW
+    
     TB --> RB
-    TB --> DC
+    HP --> HS
+    FW --> RB
+    
+    RB --> DC
+    RB --> SS
+    
     DS -. "Manages" .-> RB
     DS -. "Manages" .-> DC
     DS -. "Manages" .-> ES
+    DS -. "Manages" .-> SS
+    DS -. "Manages" .-> HS
+    
     Docker -- "bollard (Stream)" --> ES
-    MCP -- "Context" --> Claude
+    MCP -- "Wrapped Context" --> AI["AI Client (Claude Code)"]
+    AI -- "Secure output" --> TC
+    TC -- "Safe Data" --> AI
+    
     DS <-> MCP
-    DS <-> SS
-    DS <-> AA
 ```
 
 ### Core Components
 1.  **SharedBuffer (`buffer.rs`)**:
-    *   Реализован как `Arc<RwLock<VecDeque<LogLine>>>`.
+    *   Реализован как **Producer-Consumer** очередь (`crossbeam_queue::ArrayQueue`) с фоновой записью в `RwLock<VecDeque<LogLine>>`.
+    *   Это обеспечивает **Lock-free ingestion**: терминалы и другие источники никогда не блокируются при записи логов.
     *   Кольцевой буфер с фиксированной емкостью **5000 строк**.
-    *   Автоматически очищает входящие данные от ANSI-кодов и маскирует PII (Personal Identifiable Information) перед сохранением.
-2.  **DaemonState (`daemon_state.rs`)**:
-    *   Центральная структура, объединяющая ссылки на все хранилища данных (`buf`, `drain`, `error_store`).
-    *   Клонируется для каждого асинхронного таска (дешёвое клонирование за счёт `Arc`).
-3.  **TCP Bridge (`tcp_bridge.rs`)**:
-    *   Листенер на порту 8765. Принимает поток данных из VS Code и передает их в `push_line_and_drain`.
+    *   Автоматически очищает входящие данные от ANSI-кодов и маскирует PII (Regex + Entropy) перед сохранением.
+1a. **Native Capture (`pty_capture.rs`)**:
+    *   Использует `portable-pty` для прямого захвата сессий (ConPTY на Windows).
+    *   Позволяет BlackBox работать автономно без плагинов IDE.
+2.  **HttpProxy (`http_proxy.rs`)**:
+    *   Слушает на порту 8769. Позволяет перехватывать HTTP-ошибки (4xx/5xx).
+    *   Поддерживает прозрачное проксирование и заголовок `X-Proxy-Target`.
+3.  **File Watcher (`file_watcher.rs`)**:
+    *   Мониторит произвольные файлы на диске. Новые строки попадают в общий буфер с соответствующим тегом источника.
+4.  **StructuredStore (`structured_store.rs`)**:
+    *   Специализированное хранилище для JSON-логов. Позволяет выполнять поиск по `span_id` и коррелировать события между разными сервисами.
+5.  **TypedContext (`typed_context.rs`)**:
+    *   Слой безопасности (Guard), который оборачивает все данные, отправляемые ИИ, в XML-теги с атрибутами доверия (`untrusted="true"`). Это предотвращает Prompt Injection.
 
-## Data Flow
-1.  **Ingestion**: VS Code расширение подписывается на `onDidWriteTerminalData` и пересылает каждый чанк по TCP на демон.
-2.  **Processing**: Демон пропускает строку через:
-    *   `ansi::strip_ansi` (очистка цветов/курсора).
-    *   `pii_masker::mask_pii` (маскировка секретов и email).
-    *   `drain::ingest_line` (группировка в кластеры).
-3.  **Storage**: Обработанная строка (`LogLine`) попадает в `SharedBuffer`.
-4.  **Retrieval**: AI через MCP вызывает инструменты (например, `get_terminal_buffer`), которые извлекают данные из `SharedBuffer` и оборачивают их в XML-теги безопасности перед отправкой.
+## Data Flow (Unified Ingestion)
+1.  **Ingestion**: Данные поступают из VS Code (TCP), HTTP-трафика (Proxy) и файловой системы (Watcher).
+2.  **Processing**: Демон пропускает каждую сущность через:
+    *   `ansi::strip_ansi` (очистка).
+    *   `pii_masker::mask_pii` (маскировка секретов, включая тела HTTP-запросов).
+    *   `drain::ingest_line` (кластеризация).
+3.  **Cross-Source Correlation**: Благодаря единому источнику времени, инструмент `get_correlated_errors` может показать, что ошибка в терминале совпала по времени с падением Docker-контейнера и 500-й ошибкой в API.
+4.  **Retrieval**: AI получает контекст через MCP инструменты, защищенные `TypedContext`.

@@ -1,27 +1,30 @@
-# 08. Phase 3 Roadmap
+# 08. Phase 3 Roadmap (COMPLETED)
 
-> [!IMPORTANT]
-> **Repomix Context Command:**
-> `repomix --include "improvements.md,PHASE2_OVERVIEW.md" --output roadmap_context.txt`
+BlackBox Phase 3 завершена. Основные цели по нативному перехвату, расширенной аналитике и сетевому проксированию достигнуты.
 
-BlackBox Phase 2 заложила фундамент для глубокой аналитики. Phase 3 сфокусирована на производительности, нативном перехвате данных и приватности.
+## 1. Native Aggregation (Done)
+*   **File Watcher**: Прямое чтение внешних логов без посредников.
+*   **Network Interception**: Полноценный HTTP-прокси для ловли ошибок API.
+*   **Native PTY Capture**: Автоматический захват консоли через `portable-pty` (ConPTY/PTY).
 
-## 1. Native OS Interception (PTY)
-Текущая зависимость от VS Code расширения ограничивает BlackBox только редактором.
-*   **Target**: Прямой перехват системного PTY (Linux/macOS) и ConPTY (Windows).
-*   **Result**: BlackBox начнет видеть логи даже если разработчик работает в обычном терминале (iTerm2, Alacritty, PowerShell), а не только внутри VS Code.
+## 2. Advanced Correlation & Performance (Done)
+*   **Cross-Source Timeline**: Объединение Terminal + Docker + HTTP в единую временную шкалу.
+*   **Structured Parsing**: Глубокий разбор JSON-логов и поддержка Trace-ID/Span-ID.
+*   **Lock-Free Buffer**: Переход на Producer-Consumer архитектуру с использованием `crossbeam-queue` для устранения задержек при записи.
 
-## 2. Lock-free Architecture
-Для работы под высокой нагрузкой (десятки тысяч строк логов в секунду) текущий `Arc<RwLock<VecDeque>>` будет заменен на паттерн **LMAX Disruptor**.
-*   **Optimization**: Читатели (MCP инструменты) не будут блокировать писателей (Terminal Bridge) даже при интенсивном анализе.
-*   **Zero-Copy**: Использование `Bytes` и слайсов памяти для минимизации аллокаций при передаче данных между модулями.
+## 3. Security Hardening (Done)
+*   **Injection Shield**: Усиленная семантическая изоляция данных в XML-обертке с защитными метаданными.
+*   **Unified PII Masking**: Расширенная база регулярных выражений и энтропийный сканер (ML-модель отложена для сохранения легкости MCP-сервера).
 
-## 3. Advanced PII Masking (ML Based)
-Текущая маскировка на регулярных выражениях хорошо ловит стандартные ключи, но пропускает сложные контекстные данные.
-*   **Implementation**: Интеграция локальной легковесной ML-модели (на базе `candle` или `rust-bert`) для Named Entity Recognition (NER).
-*   **Privacy**: Модель будет работать полностью локально на CPU, удаляя имена людей, адреса и специфические названия сущностей из логов перед отправкой во внешние LLM.
+---
 
-## 4. Architectural Refactoring
-*   **Tool Fusion**: Объединение `get_terminal_buffer` и `get_compressed_errors` в единый интерфейс запросов с флагами детальности.
-*   **Pure-Rust Git**: Замена вызовов `git` subprocess на прямое использование API `gix` (Gitoxide) для ускорения работы `get_contextual_diff`.
-*   **ANSI State Machine**: Переход от регулярных выражений к полноценному конечному автомату для корректной обработки сложных escape-последовательностей (например, управление цветами фона или сложные перемещения курсора).
+## Phase 4: Intelligence & Scale (Backlog)
+
+### 1. AI-Driven Filtering
+Текущая фильтрация основана на правилах. Планируется переход на локальную LLM (через `candle`) для умного "рейтингования" важности логов.
+
+### 2. Persistent Storage (SQLite)
+Переход от RingBuffer в памяти к SQLite для хранения истории инцидентов за дни и недели.
+
+### 3. Distributed Context
+Поддержка сбора данных с нескольких удаленных серверов/демонов в единый контекст для ИИ.

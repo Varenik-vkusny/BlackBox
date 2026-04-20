@@ -5,42 +5,54 @@
 > `repomix --include "crates/blackbox-daemon/src/mcp/**,crates/blackbox-core/src/types.rs" --output mcp_context.txt`
 
 ## Protocol
-BlackBox реализует стандартный **Model Context Protocol (MCP)** поверх `stdio`. Транспорт использует JSON-RPC 2.0. Демон слушает входящие сообщения на `stdin` и отвечает в `stdout`.
+BlackBox реализует стандартный **Model Context Protocol (MCP)** поверх `stdio`. Демон слушает входящие сообщения на `stdin` и отвечает в `stdout`.
 
-## Tool Catalog
+## Tool Catalog (Categorized)
 
+### 1. Базовые инструменты (Core)
 | Инструмент | Описание | Основные параметры |
 | :--- | :--- | :--- |
-| `get_snapshot` | Быстрый срез статуса системы. | - |
-| `get_terminal_buffer` | Последние строки терминала (ANSI-cleaned). | `lines` (default: 100, max: 500) |
-| `get_project_metadata` | Список манифестов и ключи из `.env`. | - |
-| `read_file` | Безопасное чтение файлов проекта. | `path` (req), `from_line`, `to_line` |
-| `get_compressed_errors` | Кластеры ошибок и стек-трейсы. | `limit` (default: 50) |
+| `get_snapshot` | Быстрый срез статуса (uptime, git, ошибки). | - |
+| `get_terminal_buffer`| Последние строки терминала. | `lines`, `terminal` (source filter) |
+| `get_project_metadata`| Срез манифестов и ключей `.env`. | - |
+
+### 2. Глубокая диагностика (Diagnostics)
+| Инструмент | Описание | Основные параметры |
+| :--- | :--- | :--- |
+| `get_compressed_errors`| Шаблоны ошибок (Drain) и стек-трейсы. | `limit` (max clusters) |
 | `get_contextual_diff` | Дифф файлов, упомянутых в ошибках. | - |
-| `get_container_logs` | Фильтрованные логи Docker (ERROR/WARN). | `container_id` (opt), `limit` |
-| `get_postmortem` | Анализ инцидента за период (таймлайн). | `minutes` (default: 30) |
-| `get_correlated_errors`| Корреляция терминала и Docker по времени. | `window_secs` (default: 5) |
+| `get_postmortem` | Таймлайн инцидента за период. | `minutes` (1-1440) |
+| `read_file` | Безопасное чтение файлов проекта. | `path`, `from_line`, `to_line` |
 
-### Key Tools Depth
+### 3. Инфраструктура и Сеть (Infrastructure)
+| Инструмент | Описание | Основные параметры |
+| :--- | :--- | :--- |
+| `get_container_logs` | Ошибки Docker-контейнеров. | `container_id` (opt) |
+| `get_http_errors` | Логи HTTP-ошибок (4xx/5xx) через прокси. | `limit` (max 200) |
+| `get_correlated_errors`| Корреляция терминала, Docker и HTTP. | `window_secs` (time window) |
 
-#### `get_snapshot`
-Возвращает `daemon_uptime_secs`, `project_type` (cargo, npm, go), текущую `git_branch`, количество `git_dirty_files` и статистику буфера. ИИ должен вызывать этот инструмент первым.
+### 4. Отслеживание и История (Tracking)
+| Инструмент | Описание | Основные параметры |
+| :--- | :--- | :--- |
+| `get_recent_commits` | История коммитов (stats, автор, время). | `limit`, `path_filter` (opt) |
+| `watch_log_file` | Добавить внешний файл под наблюдение. | `path` (absolute or relative) |
+| `get_watched_files` | Список всех отслеживаемых файлов. | - |
 
-#### `get_compressed_errors`
-Использует алгоритм **Drain** для группировки сотен похожих ошибок в один кластер. Также содержит `stack_traces` — структурированные данные о падениях (Rust, Python, Node, Java).
-
-#### `get_contextual_diff`
-Самый "умный" инструмент. Он находит файлы, которые:
-1. Имеют незакоммиченные изменения в Git.
-2. Одновременно фигурируют в последних стек-трейсах из терминала.
-Это позволяет ИИ сразу видеть код, который, вероятно, вызвал ошибку.
+### 5. Расширенная аналитика (Advanced)
+| Инструмент | Описание | Основные параметры |
+| :--- | :--- | :--- |
+| `get_structured_context`| Поиск по структурированным логам/спанам. | `span_id` (opt), `limit` |
+| `get_process_logs` | Логи конкретного процесса по PID. | `pid` (opt), `limit` |
 
 ## Fallback System
-BlackBox проектировался так, чтобы ИИ **никогда** не получал пустой или бесполезный ответ. Инструменты имеют цепочку фолбэков:
+BlackBox использует цепочку фолбэков, чтобы ИИ **всегда** имел данные для анализа:
+1. **Contextual Data** (например, Diff). Если пусто ->
+2. **Aggregated Data** (например, Compressed Errors). Если пусто ->
+3. **Raw Data** (Terminal Buffer).
+4. **Insight**: Объяснение (например, "Docker не запущен, использую данные терминала").
 
-1. **Smart Data** (например, Contextual Diff). Если данных нет →
-2. **Intermediate Data** (Compressed Errors). Если данных нет →
-3. **Raw Data** (Terminal Buffer). Если данных нет →
-4. **Explanation**: Ответ с полем `fallback_source: "none"` и причиной (например, "буфер еще пуст").
-
-Это гарантирует, что AI-агент всегда имеет отправную точку для исследования.
+## Security & Injection Protection
+Все данные, возвращаемые инструментами `get_terminal_buffer` и `get_process_logs`, проходят через **TypedContext Guard**, который:
+* Оборачивает вывод в теги `<untrusted_content source="...">`.
+* Экранирует опасные символы внутри контента.
+* Позволяет ИИ понимать границы между системными данными и собственными инструкциями.

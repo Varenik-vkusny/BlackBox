@@ -24,7 +24,11 @@ yarn-error.log*
 Thumbs.db
 
 # Project Specific
-vscode-extension/out/
+archive/
+scratch/
+repomix-output.xml
+*.log
+daemon_test.log*
 .claude/
 .gemini/
 .antigravity/

@@ -25,13 +25,13 @@ pub struct LogResponse {
     pub lines: Vec<String>,
 }
 
-pub async fn run_admin_api(state: DaemonState, port: u16) {
+fn build_router(state: DaemonState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
+    Router::new()
         .route("/api/status", get(get_status))
         .route("/api/terminal", get(get_terminal_logs))
         .route("/api/compressed", get(get_compressed_logs))
@@ -42,11 +42,24 @@ pub async fn run_admin_api(state: DaemonState, port: u16) {
         .route("/api/inject", post(inject_log))
         .route("/api/clear", post(clear_logs))
         .route("/api/watch", post(watch_file))
-        // MCP Streamable HTTP transport endpoint
         .route("/mcp", post(mcp_http_handler))
         .layer(cors)
-        .with_state(state);
+        .with_state(state)
+}
 
+/// Called from main.rs with a pre-bound listener so the port is reserved
+/// synchronously before any background tasks are spawned.
+pub async fn run_admin_api_with_listener(
+    state: DaemonState,
+    listener: tokio::net::TcpListener,
+) {
+    let app = build_router(state);
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Admin API server error: {e}");
+    }
+}
+
+pub async fn run_admin_api(state: DaemonState, port: u16) {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -55,9 +68,7 @@ pub async fn run_admin_api(state: DaemonState, port: u16) {
             return;
         }
     };
-    if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("Admin API server error: {e}");
-    }
+    run_admin_api_with_listener(state, listener).await;
 }
 
 async fn get_status(State(state): State<DaemonState>) -> impl IntoResponse {
@@ -88,7 +99,7 @@ async fn get_terminal_logs(
     Query(params): Query<LogParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(100);
-    let buf = state.buf.read().unwrap();
+    let buf = state.buf.ring.read().unwrap();
     let lines = buf.iter().rev().take(limit).map(|l| l.text.clone()).collect::<Vec<_>>();
     Json(LogResponse { lines })
 }
@@ -102,13 +113,14 @@ async fn get_compressed_logs(State(state): State<DaemonState>) -> impl IntoRespo
 }
 
 async fn get_docker_logs(State(state): State<DaemonState>) -> impl IntoResponse {
+    let docker_available = state.docker_reachable.load(std::sync::atomic::Ordering::Relaxed);
     let store = state.error_store.read().unwrap();
     let containers = store.container_ids();
     let events = store.get_events(None, 50);
     Json(serde_json::json!({
         "containers": containers,
         "events": events,
-        "docker_available": !containers.is_empty()
+        "docker_available": docker_available
     }))
 }
 
@@ -162,14 +174,14 @@ async fn inject_log(
 ) -> impl IntoResponse {
     for line in payload.text.split('\n') {
         if !line.trim().is_empty() {
-            push_line_and_drain(&state.buf, &state.drain, line.to_string(), payload.terminal.clone());
+            push_line_and_drain(&state.buf, &state.drain, &state.structured, line.to_string(), payload.terminal.clone());
         }
     }
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
 async fn clear_logs(State(state): State<DaemonState>) -> impl IntoResponse {
-    let mut buf = state.buf.write().unwrap();
+    let mut buf = state.buf.ring.write().unwrap();
     buf.clear();
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
@@ -219,9 +231,6 @@ async fn mcp_http_handler(
 ) -> impl IntoResponse {
     use blackbox_core::protocol::{error_codes, JsonRpcRequest, JsonRpcResponse};
     use axum::http::header;
-
-    let body_str = String::from_utf8_lossy(&body);
-    eprintln!("BlackBox MCP-HTTP: recv {}", body_str);
 
     let req: JsonRpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,

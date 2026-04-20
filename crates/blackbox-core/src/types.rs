@@ -145,3 +145,42 @@ pub struct CommitInfo {
     pub insertions: u32,
     pub deletions: u32,
 }
+
+// ── Idea 5: Structured log parsing ───────────────────────────────────────────
+
+/// Format of the structured log line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredLogFormat {
+    /// Rust `tracing` crate (fields nested under "fields" key, level is string)
+    Tracing,
+    /// Node.js `pino` / `bunyan` (level is integer: 10/20/30/40/50/60)
+    Pino,
+    /// Go `logrus` / `zap` (msg + level as string + time)
+    Logrus,
+    /// Python `structlog` (event instead of msg)
+    Structlog,
+    /// Java Logback (logstash-logback-encoder), Log4j2 JSON, or Spring Boot structured logging
+    JavaLogback,
+    /// Generic JSON with level + msg/message
+    Generic,
+}
+
+/// A single parsed structured log event extracted from JSON terminal output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredEvent {
+    pub timestamp_ms: u64,
+    pub format: StructuredLogFormat,
+    pub level: Option<String>,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Remaining key-value pairs (string values only, PII-masked).
+    pub extra: std::collections::HashMap<String, String>,
+}

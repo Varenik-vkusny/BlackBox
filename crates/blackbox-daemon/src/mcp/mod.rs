@@ -3,22 +3,34 @@ use serde_json::{json, Value};
 
 use crate::daemon_state::DaemonState;
 
+pub mod proxy;
 pub mod tools;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-pub async fn run_mcp_stdio(state: DaemonState) {
-    eprintln!("BlackBox MCP: stdio loop starting");
+/// Returns `true` if at least one real MCP message was handled (a real stdio
+/// client connected and later disconnected). Returns `false` if stdin was
+/// immediately at EOF (daemon started as a background service with no
+/// console — Windows NUL device, `Start-Process -WindowStyle Hidden`, etc.).
+pub async fn run_mcp_stdio(state: DaemonState) -> bool {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
+    let mut handled_any = false;
 
     while let Ok(Some(line)) = reader.next_line().await {
-        if line.trim().is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
 
-        eprintln!("BlackBox MCP: recv method={}", extract_method(&line));
+        // Some MCP clients send HTTP-style headers (Content-Length: ...)
+        // We skip these to support those clients robustly.
+        if trimmed.to_lowercase().starts_with("content-") {
+            continue;
+        }
+
+        handled_any = true;
 
         if let Some(response) = handle_message(&line, &state).await {
             let json = serde_json::to_string(&response).unwrap_or_default();
@@ -26,11 +38,11 @@ pub async fn run_mcp_stdio(state: DaemonState) {
             out_bytes.push(b'\n');
             let _ = stdout.write_all(&out_bytes).await;
             let _ = stdout.flush().await;
-            eprintln!("BlackBox MCP: sent response ok");
         }
     }
 
-    eprintln!("BlackBox MCP: stdio loop ended (stdin EOF)");
+    eprintln!("BlackBox MCP: stdio loop ended (stdin EOF, handled_any={handled_any})");
+    handled_any
 }
 
 fn extract_method(line: &str) -> String {
@@ -238,6 +250,40 @@ pub fn handle_tools_list_value() -> serde_json::Value {
                         "limit": {
                             "type": "integer",
                             "description": "Max number of HTTP error events to return. Default: 50, max: 200."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "get_process_logs",
+                "description": "Returns captured stdout/stderr from processes launched with 'blackbox-run <command>'. Each process appears as a separate terminal stream tagged 'process:<pid>'. Use pid parameter to filter to a specific process, or omit for all processes. Lists all known process PIDs captured. Run 'blackbox-run node server.js' instead of 'node server.js' to enable capture.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pid": {
+                            "type": "integer",
+                            "description": "Optional PID to filter logs for a specific process. Omit to get logs from all captured processes."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max number of lines to return. Default: 200, max: 500."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "get_structured_context",
+                "description": "Queries structured JSON log events parsed from the terminal buffer. Supports Rust tracing, Node.js pino/bunyan, Go logrus/zap, and Python structlog formats. Use span_id to retrieve the full chain of events for a single request (e.g. 'db query started → db query failed → handler threw'). Without span_id, returns the most recent structured events. Ideal for distributed tracing without Jaeger/Zipkin — works locally with zero infrastructure.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "span_id": {
+                            "type": "string",
+                            "description": "Optional span ID to filter by. Returns all events from a single request trace. E.g. 'abc123'."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max events to return when no span_id specified. Default: 50, max: 200."
                         }
                     }
                 }

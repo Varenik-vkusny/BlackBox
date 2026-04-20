@@ -1,0 +1,61 @@
+{
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "compress": false,
+    "removeComments": false,
+    "removeEmptyLines": true,
+    "showLineNumbers": false,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "topFilesLength": 10,
+    "instructionFilePath": "CLAUDE.md"
+  },
+  "include": [
+    "crates/**/*.rs",
+    "crates/**/Cargo.toml",
+    "Cargo.toml",
+    "blackbox-lab/src/**",
+    "blackbox-lab/index.html",
+    "vscode-extension/src/**",
+    "shell-hooks/*.bash",
+    "shell-hooks/*.zsh",
+    "shell-hooks/*.ps1",
+    "docs/*.md",
+    "CLAUDE.md",
+    "PROJECT_MAP.md",
+    "PHASE3_GAPS.md",
+    ".mcp.json",
+    "start-daemon.ps1"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "target/**",
+      "Cargo.lock",
+      "*.log",
+      "**/node_modules/**",
+      "blackbox-lab/dist/**",
+      "**/*.class",
+      "**/*.svg",
+      "blackbox-lab/src/assets/**",
+      "scratch/**",
+      "docs/plans/**",
+      "Phase 1.md",
+      "Phase 2.md",
+      "Phase 3.md",
+      "PHASE2_OVERVIEW.md",
+      "improvements.md",
+      "stress_test.py",
+      "test_output.py",
+      "mcp_bridge.py",
+      "daemon_test*.log",
+      "daemon_error.log",
+      "app.log"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": false
+  }
+}

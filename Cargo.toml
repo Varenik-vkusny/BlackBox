@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "crates/blackbox-core",
-    "crates/blackbox-daemon", "crates/blackbox-sandbox", "crates/blackbox-test",
-    "crates/blackbox-tui",
+    "crates/blackbox-daemon", "crates/blackbox-run", "crates/blackbox-test",
 ]
 resolver = "2"
 

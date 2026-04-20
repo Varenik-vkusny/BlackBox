@@ -13,8 +13,7 @@
 | **MCP tools (4)** | get_snapshot, get_terminal_buffer, get_project_metadata, read_file | ✅ |
 | **Path traversal protection** | canonicalize + starts_with validation | ✅ |
 | **XML injection guard** | Escape `</terminal_output>` + common HTML tags in wrapped output | ✅ |
-| **Status TUI (blackbox-tui)** | ratatui dashboard polling status_server port 8766 | ✅ |
-| **Interactive sandbox** | 5-tab TUI for manual testing without AI agent (bonus) | ✅ |
+| **XML injection guard** | Escape `</terminal_output>` + common HTML tags in wrapped output | ✅ |
 
 ## Phase 2 Requirements (All Complete ✅)
 
@@ -29,14 +28,14 @@
 | **MCP tools (3 new = 7 total)** | get_compressed_errors, get_contextual_diff, get_container_logs | ✅ |
 
 ## Phase Status
-- **Phase 1**: ✅ Complete (MVP daemon + VS Code bridge + sandbox)
+- **Phase 1**: ✅ Complete (MVP daemon + VS Code bridge)
 - **Phase 2**: ✅ Complete (compression, Docker monitoring, smart diffs — 7 MCP tools total)
 - **Phase 3**: ✅ Complete (PII masker + entropy scanner, ANSI state machine, typed context, 2 new MCP tools, shell hooks, React lab UI)
 
 ## Cargo Workspace Pattern
 - Workspace root: `[workspace.package]` with version, edition = "2021", rust-version = "1.77"
 - All crates: use `{ workspace = true }` for serde, tokio, etc.
-- Three crates: blackbox-core (types lib), blackbox-daemon (MCP binary), blackbox-tui (ratatui binary), blackbox-sandbox (interactive testing TUI)
+- Three crates: blackbox-core (types lib), blackbox-daemon (MCP binary), blackbox-run (cli wrapper)
 
 ## Ring Buffer Design
 - `Arc<RwLock<VecDeque<LogLine>>>` with FIFO eviction: `pop_front()` when at 5000-line capacity
@@ -71,17 +70,6 @@
 - Newline-delimited JSON-RPC 2.0 over stdio
 - Tools return structured JSON (e.g., `{ "name": "...", "version": "..." }`), not formatted strings
 - Error codes: -32600 (invalid req), -32700 (parse), -32601 (method not found), -32602 (invalid params), -32603 (internal)
-
-## Interactive Sandbox
-- `blackbox-sandbox`: 5-tab TUI (Logs, Snapshot, Metadata, File, Inject)
-- Manual tool calling without AI agent, reusable across Phase 2/3
-- Spawn daemon internally, own stdin/stdout pipes
-
-## Sandbox UI Patterns
-- **Scroll preservation**: Check `scroll >= content_len - 1` before auto-refresh to preserve user scroll; only pin to bottom if already there
-- **Multi-line input**: Accept `\n` literals in text fields for blocks (split on `\n` before sending)
-- **File range syntax**: `path:N` = 20-line window around line N; `path:N-M` = explicit range (use `rsplitn(2, ':')` to avoid Windows drive letter issues)
-- **Empty manifest name**: Workspace `Cargo.toml` has no `[package]` — display `(workspace root — no [package])` instead of blank
 
 ## Permissions Best Practices
 - **Broad wildcards over specific rules**: `Bash(git *)` instead of listing 8 specific git commands; `Bash(cargo *)` instead of 3 specific cargo subcommands
@@ -231,7 +219,7 @@
 - **Symptom**: `git diff` shows `Binary files differ` but file looks normal in editor
 - **Cause**: VS Code or system appends UTF-16 encoded bytes (e.g., `// test\n` becomes `2F 00 2F 00 20 00 74 00 65 00 73 00 74 00 0A 00 0A 00`)
 - **Fix**: Use PowerShell `[System.IO.File]::ReadAllBytes("path")` to find where clean bytes end (look for last `0A 0A` = `\n\n`), truncate to that point, write back as UTF-8
-- **Prevention**: Don't manually append test code to files; use proper test injection via `blackbox-sandbox` inject tab
+- **Prevention**: Don't manually append test code to files; use proper test injection via `blackbox-lab` inject station
 
 ### Windows .exe File Lock on Rebuild
 - **Symptom**: `cargo build` fails with "Access is denied" when daemon/sandbox is running

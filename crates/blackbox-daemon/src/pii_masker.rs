@@ -34,12 +34,19 @@ pub fn mask_pii(text: &str) -> String {
     });
     let password_re = PASSWORD_RE.get_or_init(|| {
         // key=value style credentials
-        Regex::new(r"(?i)(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token)\s*[=:]\s*\S+")
+        Regex::new(r"(?i)(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|client[_\-]?secret|db[_\-]?pass|database[_\-]?password|session[_\-]?id|cookie)\s*[=:]\s*\S+")
             .unwrap()
     });
     let known_keys_re = KNOWN_KEYS_RE.get_or_init(|| {
         // Recognisable API key prefixes from major providers
-        Regex::new(r"\b(?:AKIA|ASIA|AROA|AIDA|AGPA|AIPA|ANPA|ANVA|APKA)[A-Z0-9]{16}\b|ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|sk-[A-Za-z0-9]{32,}|pk-[A-Za-z0-9]{32,}").unwrap()
+        // Includes: AWS, GitHub, Stripe, OpenAI, Slack (xoxp/xoxb/xoxr), Discord, GCP
+        Regex::new(r"\b(?:AKIA|ASIA|AROA|AIDA|AGPA|AIPA|ANPA|ANVA|APKA)[A-Z0-9]{16}\b|\
+                     ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|\
+                     sk_[A-Za-z0-9]{32,}|pk_[A-Za-z0-9]{32,}|\
+                     (xox[p|b|b|r|a]-[A-Za-z0-9\-]{10,})|\
+                     AIza[0-9A-Za-z\-_]{35}|\
+                     [A-Za-z0-9]{24}\.[A-Za-z0-9]{6}\.[A-Za-z0-9_\-]{27,}")
+            .unwrap()
     });
 
     let s = email_re.replace_all(text, "<EMAIL_MASKED>");

@@ -13,7 +13,6 @@ const RESET: &str = "\x1b[0m";
 
 // Use offset ports to avoid clashing with a running daemon
 const BRIDGE_PORT: u16 = 18765;
-const STATUS_PORT: u16 = 18766;
 
 // ── Test runner ───────────────────────────────────────────────────────────────
 
@@ -78,7 +77,6 @@ impl Daemon {
             .args([
                 "--cwd", cwd,
                 "--port", &BRIDGE_PORT.to_string(),
-                "--status-port", &STATUS_PORT.to_string(),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -99,7 +97,17 @@ impl Daemon {
         self.stdin.flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
         self.stdout.read_line(&mut line).map_err(|e| e.to_string())?;
-        serde_json::from_str(line.trim()).map_err(|e| format!("bad JSON: {e} | got: {line}"))
+        let mut v: serde_json::Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad JSON: {e} | got: {line}"))?;
+
+        // If it's a tool call result, unwrap the MCP "content" wrapper
+        if v["result"]["content"].is_array() {
+            if let Some(text) = v["result"]["content"][0]["text"].as_str() {
+                if let Ok(inner) = serde_json::from_str::<serde_json::Value>(text) {
+                    v["result"] = inner;
+                }
+            }
+        }
+        Ok(v)
     }
 
     fn stop(&mut self) {
@@ -146,7 +154,7 @@ fn main() {
     println!("{BOLD}{CYAN}◉  BlackBox Integration Test Suite{RESET}");
     println!("{CYAN}   daemon : {}{RESET}", daemon_path.display());
     println!("{CYAN}   cwd    : {cwd_str}{RESET}");
-    println!("{CYAN}   ports  : bridge={BRIDGE_PORT}  status={STATUS_PORT}{RESET}");
+    println!("{CYAN}   ports  : bridge={BRIDGE_PORT}{RESET}");
 
     let mut r = TestRunner::new();
 
@@ -178,10 +186,13 @@ fn main() {
             let tools: Vec<&str> = v["result"]["tools"].as_array()
                 .unwrap_or(&empty).iter()
                 .filter_map(|t| t["name"].as_str()).collect();
-            r.check("tools/list → 7 tools", tools.len() == 7, &format!("got {}: {tools:?}", tools.len()));
+            r.check("tools/list → 15 tools", tools.len() == 15, &format!("got {}: {tools:?}", tools.len()));
             for name in [
                 "get_snapshot", "get_terminal_buffer", "get_project_metadata", "read_file",
                 "get_compressed_errors", "get_contextual_diff", "get_container_logs",
+                "get_postmortem", "get_correlated_errors", "get_recent_commits",
+                "watch_log_file", "get_watched_files", "get_http_errors", "get_process_logs",
+                "get_structured_context",
             ] {
                 r.check(&format!("  tool '{name}' present"), tools.contains(&name), "not in list");
             }
@@ -332,27 +343,25 @@ fn main() {
     }
     let _ = std::fs::remove_file(&env_file);
 
-    // ── 7. Status server ──────────────────────────────────────────────────────
-    r.section("7 · Status Server");
+    // ── 7. New Phase 3 Tools ──────────────────────────────────────────────────
+    r.section("7 · Phase 3 Tools (get_postmortem, get_correlated_errors)");
 
-    match TcpStream::connect(format!("127.0.0.1:{STATUS_PORT}")) {
-        Ok(stream) => {
-            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(_) => match serde_json::from_str::<serde_json::Value>(line.trim()) {
-                    Ok(v) => {
-                        r.check("returns valid JSON",        v["buffer_lines"].is_number(),        &v.to_string());
-                        r.check("uptime_secs present",       v["uptime_secs"].is_number(),          "missing");
-                        r.check("has_recent_errors present", v["has_recent_errors"].is_boolean(),   "missing");
-                    }
-                    Err(e) => r.fail("status JSON parse", &format!("{e} | {line}")),
-                },
-                Err(e) => r.fail("status server read", &e.to_string()),
-            }
+    match d.send(call(14, "get_postmortem", serde_json::json!({"minutes": 1}))) {
+        Ok(v) => {
+            let res = &v["result"];
+            r.check("postmortem returns valid JSON", v["error"].is_null(), &v.to_string());
+            r.check("timeline present", res["timeline"].is_array(), "missing");
         }
-        Err(e) => r.fail("status server connect", &e.to_string()),
+        Err(e) => r.fail("get_postmortem", &e),
+    }
+
+    match d.send(call(15, "get_correlated_errors", serde_json::json!({"window_secs": 5}))) {
+        Ok(v) => {
+            let res = &v["result"];
+            r.check("correlated_errors returns valid JSON", v["error"].is_null(), &v.to_string());
+            r.check("correlations present", res["correlations"].is_array(), "missing");
+        }
+        Err(e) => r.fail("get_correlated_errors", &e),
     }
 
     // ── 8. get_compressed_errors — cluster deduplication ─────────────────────
@@ -441,7 +450,7 @@ fn main() {
     let passed = r.summary();
     println!();
     if passed {
-        println!("{GREEN}{BOLD}✓  All tests passed — Phase 1 + Phase 2 verified{RESET}");
+        println!("{GREEN}{BOLD}✓  All tests passed — Phase 3 + Modernized verified{RESET}");
     } else {
         println!("{RED}{BOLD}✗  Some tests failed — see details above{RESET}");
     }

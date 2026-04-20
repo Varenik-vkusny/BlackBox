@@ -25,6 +25,9 @@ pub fn extract_stack_traces(lines: &[LogLine]) -> Vec<ParsedStackTrace> {
         } else if let Some((trace, next_i)) = try_parse_java(lines, i) {
             i = next_i;
             results.push(trace);
+        } else if let Some((trace, next_i)) = try_parse_go(lines, i) {
+            i = next_i;
+            results.push(trace);
         } else {
             let _ = text; // suppress unused warning
             i += 1;
@@ -435,6 +438,122 @@ fn parse_java_frame_location(frame: &str) -> (Option<String>, Option<u32>) {
     (None, None)
 }
 
+// ── Go panic / goroutine dump ─────────────────────────────────────────────────
+// Trigger: "panic: ..." or "goroutine N [running]:"
+// Frames come in PAIRS: function name line (unindented) + file path (tab-indented)
+// Example:
+//   panic: runtime error: index out of range [0] with length 0
+//   goroutine 1 [running]:
+//   main.handler(0xc0000b4000, 0xc0000b2000)
+//           /app/main.go:42 +0x80
+//   main.main()
+//           /app/main.go:15 +0x2c
+
+fn try_parse_go(lines: &[LogLine], start: usize) -> Option<(ParsedStackTrace, usize)> {
+    let trigger = &lines[start].text;
+    let trimmed = trigger.trim();
+
+    let is_panic = trimmed.starts_with("panic:");
+    let is_goroutine = trimmed.starts_with("goroutine ") && trimmed.contains('[') && trimmed.ends_with(':');
+    if !is_panic && !is_goroutine {
+        return None;
+    }
+
+    let error_message = trimmed.to_string();
+    let mut frames: Vec<StackFrame> = Vec::new();
+    let mut source_files = Vec::new();
+    let mut j = start + 1;
+    let mut pending_func: Option<String> = None;
+
+    while j < lines.len() {
+        let raw = &lines[j].text;
+        let trimmed_j = raw.trim();
+
+        if trimmed_j.is_empty() {
+            // Empty line after frames signals end of goroutine section
+            if !frames.is_empty() { break; }
+            j += 1;
+            continue;
+        }
+
+        if trimmed_j == "exit status 2" || trimmed_j == "exit status 1" {
+            break;
+        }
+
+        // Tab-indented line = file:line for the previous function
+        if raw.starts_with('\t') || raw.starts_with("        ") {
+            if let Some(func) = pending_func.take() {
+                let path_part = trimmed_j.split(' ').next().unwrap_or(trimmed_j);
+                let (file, line) = parse_go_file_location(path_part);
+                let is_user = !is_go_stdlib_frame(&func);
+                if is_user {
+                    if let Some(ref f) = file {
+                        source_files.push(f.clone());
+                    }
+                }
+                frames.push(StackFrame {
+                    raw: format!("{func}\n\t{trimmed_j}"),
+                    file,
+                    line,
+                    is_user_code: is_user,
+                });
+            }
+            j += 1;
+            continue;
+        }
+
+        // Goroutine header — skip if we haven't started collecting frames yet
+        if trimmed_j.starts_with("goroutine ") && trimmed_j.contains('[') {
+            if !frames.is_empty() { break; } // new goroutine = stop current trace
+            j += 1;
+            continue;
+        }
+
+        // Non-indented, non-goroutine line = function name
+        pending_func = Some(trimmed_j.to_string());
+
+        if j - start > 80 { break; }
+        j += 1;
+    }
+
+    if frames.is_empty() {
+        return None;
+    }
+
+    source_files.sort();
+    source_files.dedup();
+
+    Some((ParsedStackTrace {
+        language: "go".into(),
+        error_message,
+        frames,
+        source_files,
+        captured_at_ms: now_ms(),
+    }, j))
+}
+
+fn parse_go_file_location(path: &str) -> (Option<String>, Option<u32>) {
+    // "/app/main.go:42" or "/app/main.go:42 +0x80"
+    let path = path.split(' ').next().unwrap_or(path);
+    // Use rsplitn to handle Windows-style paths like C:\app\main.go:42
+    let parts: Vec<&str> = path.rsplitn(2, ':').collect();
+    if parts.len() == 2 {
+        let line: Option<u32> = parts[0].parse().ok();
+        let file = parts[1].to_string();
+        return (Some(file), line);
+    }
+    (Some(path.to_string()), None)
+}
+
+fn is_go_stdlib_frame(func: &str) -> bool {
+    func.starts_with("runtime.")
+        || func.starts_with("reflect.")
+        || func.starts_with("testing.")
+        || func.contains("runtime/")
+        || func.starts_with("sync.")
+        || func.starts_with("net/http.")
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 fn is_user_file(path: &str) -> bool {
@@ -465,7 +584,7 @@ mod tests {
     fn lines(texts: &[&str]) -> Vec<LogLine> {
         texts
             .iter()
-            .map(|t| LogLine { text: t.to_string(), timestamp_ms: 0 })
+            .map(|t| LogLine { text: t.to_string(), timestamp_ms: 0, source_terminal: None })
             .collect()
     }
 
@@ -598,6 +717,25 @@ mod tests {
         assert!(!traces.is_empty(), "should parse single-frame java exception");
         assert_eq!(traces[0].language, "java");
         assert!(traces[0].source_files.iter().any(|f| f == "Main.java"));
+    }
+
+    #[test]
+    fn parses_go_panic() {
+        let input = lines(&[
+            "panic: runtime error: index out of range [0] with length 0",
+            "",
+            "goroutine 1 [running]:",
+            "main.handler(0xc0000b4000)",
+            "\t/app/main.go:42 +0x80",
+            "main.main()",
+            "\t/app/main.go:15 +0x2c",
+            "exit status 2",
+        ]);
+        let traces = extract_stack_traces(&input);
+        assert!(!traces.is_empty(), "should parse go panic");
+        assert_eq!(traces[0].language, "go");
+        assert!(traces[0].source_files.iter().any(|f| f.contains("main.go")));
+        assert_eq!(traces[0].frames.len(), 2);
     }
 
     #[test]

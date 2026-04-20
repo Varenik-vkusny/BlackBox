@@ -41,6 +41,8 @@ pub async fn handle_tools_call(
         "watch_log_file" => watch_log_file(state, &args),
         "get_watched_files" => get_watched_files(state),
         "get_http_errors" => get_http_errors(state, &args),
+        "get_structured_context" => get_structured_context(state, &args),
+        "get_process_logs" => get_process_logs(state, &args),
         _ => return JsonRpcResponse::error(
             id,
             error_codes::METHOD_NOT_FOUND,
@@ -312,12 +314,12 @@ async fn get_container_logs(state: &DaemonState, args: &Value) -> Value {
     let container_id = args["container_id"].as_str();
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
 
-    let (containers, events, docker_available) = {
+    let docker_available = state.docker_reachable.load(std::sync::atomic::Ordering::Relaxed);
+    let (containers, events) = {
         let store = state.error_store.read().unwrap();
         let containers = store.container_ids();
-        let docker_available = !containers.is_empty();
         let events = store.get_events(container_id, limit);
-        (containers, events, docker_available)
+        (containers, events)
     };
 
     if docker_available && !events.is_empty() {
@@ -389,7 +391,7 @@ pub async fn get_postmortem(state: &DaemonState, args: &Value) -> Value {
     let cutoff_ms = now.saturating_sub(minutes * 60 * 1_000);
 
     let lines = {
-        let guard = state.buf.read().unwrap();
+        let guard = state.buf.ring.read().unwrap();
         guard
             .iter()
             .filter(|l| l.timestamp_ms >= cutoff_ms)
@@ -457,7 +459,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
 
     // Collect recent terminal error lines
     let terminal_errors: Vec<_> = {
-        let guard = state.buf.read().unwrap();
+        let guard = state.buf.ring.read().unwrap();
         guard
             .iter()
             .filter(|l| {
@@ -504,7 +506,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
     let has_docker_correlations = correlations.iter().any(|c| {
         c["correlated_docker_events"]
             .as_array()
-            .map_or(false, |a| !a.is_empty())
+            .map_or(false, |a: &Vec<Value>| !a.is_empty())
     });
 
     // Also correlate with HTTP errors (third source)
@@ -531,7 +533,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
     let has_http_correlations = correlations.iter().any(|c| {
         c["correlated_http_errors"]
             .as_array()
-            .map_or(false, |a| !a.is_empty())
+            .map_or(false, |a: &Vec<Value>| !a.is_empty())
     });
     let has_correlations = has_docker_correlations || has_http_correlations;
 
@@ -621,5 +623,84 @@ pub async fn get_recent_commits(state: &DaemonState, args: &Value) -> Value {
     json!({
         "commits": commits,
         "total": commits.len()
+    })
+}
+
+pub fn get_process_logs(state: &DaemonState, args: &Value) -> Value {
+    let pid = args["pid"].as_u64();
+    let limit = args["limit"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
+
+    let terminal_filter = pid.map(|p| format!("process:{p}"));
+    let filter_ref = terminal_filter.as_deref();
+
+    // List known process terminals in the buffer
+    let all_terminals = crate::buffer::list_terminals(&state.buf);
+    let process_terminals: Vec<&str> = all_terminals
+        .iter()
+        .filter(|t| t.starts_with("process:"))
+        .map(|t| t.as_str())
+        .collect();
+
+    if process_terminals.is_empty() && terminal_filter.is_none() {
+        return json!({
+            "lines": [],
+            "total": 0,
+            "known_processes": [],
+            "hint": "No process logs captured. Run: blackbox-run <command> [args] to capture a process."
+        });
+    }
+
+    let lines = crate::buffer::get_last_n(&state.buf, limit, filter_ref);
+    let content: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let source = filter_ref.unwrap_or("all_processes");
+    let output = crate::typed_context::wrap_untrusted(&content, source);
+
+    json!({
+        "content": output,
+        "lines_returned": lines.len(),
+        "pid_filter": pid,
+        "known_processes": process_terminals
+    })
+}
+
+pub fn get_structured_context(state: &DaemonState, args: &Value) -> Value {
+    let span_id = args["span_id"].as_str();
+    let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+
+    let events = if let Some(sid) = span_id {
+        crate::structured_store::get_by_span_id(&state.structured, sid)
+    } else {
+        crate::structured_store::get_recent(&state.structured, limit, None)
+    };
+
+    let total_parsed = crate::structured_store::store_len(&state.structured);
+
+    if events.is_empty() {
+        if total_parsed == 0 {
+            return json!({
+                "events": [],
+                "total_parsed": 0,
+                "fallback_source": "none",
+                "hint": "No structured JSON logs detected. Emit logs in JSON format (tracing, pino, logrus, structlog) to enable span correlation."
+            });
+        }
+        return json!({
+            "events": [],
+            "total_parsed": total_parsed,
+            "span_id": span_id,
+            "fallback_source": "none",
+            "hint": if span_id.is_some() {
+                "No events found for this span_id. Check spelling or use get_structured_context without span_id to list recent events."
+            } else {
+                "No structured events found."
+            }
+        });
+    }
+
+    json!({
+        "events": events,
+        "count": events.len(),
+        "total_parsed": total_parsed,
+        "span_id_filter": span_id
     })
 }

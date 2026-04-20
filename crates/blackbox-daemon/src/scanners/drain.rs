@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     fn make_line(text: &str) -> LogLine {
-        LogLine { text: text.into(), timestamp_ms: 1000 }
+        LogLine { text: text.into(), timestamp_ms: 1000, source_terminal: None }
     }
 
     #[test]

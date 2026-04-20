@@ -1,0 +1,13 @@
+[package]
+name = "blackbox-run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Wrapper that tees process stdout/stderr into BlackBox's terminal buffer"
+
+[[bin]]
+name = "blackbox-run"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::buffer::{push_line_and_drain, SharedBuffer};
 use crate::scanners::drain::SharedDrainState;
+use crate::structured_store::SharedStructuredStore;
 
 /// Per-file state tracked by the watcher.
 struct WatchedFile {
@@ -26,6 +27,7 @@ pub fn new_watch_list() -> SharedWatchList {
 pub async fn run_file_watcher(
     buf: SharedBuffer,
     drain: SharedDrainState,
+    structured: SharedStructuredStore,
     cwd: PathBuf,
     watch_list: SharedWatchList,
 ) {
@@ -68,16 +70,19 @@ pub async fn run_file_watcher(
         let _ = watcher.watch(path, RecursiveMode::NonRecursive);
     }
 
-    // State per watched file
+    // State per watched file; rejected_paths avoids re-checking binary files every 100ms
     let mut file_states: HashMap<PathBuf, WatchedFile> = HashMap::new();
+    let mut rejected_paths: HashSet<PathBuf> = HashSet::new();
     for path in &initial_paths {
-        if let Some(state) = open_tail(path) {
-            file_states.insert(path.clone(), state);
+        match open_tail(path) {
+            Some(state) => { file_states.insert(path.clone(), state); }
+            None => { rejected_paths.insert(path.clone()); }
         }
     }
 
     let buf_clone = buf.clone();
     let drain_clone = drain.clone();
+    let structured_clone = structured.clone();
     let watch_list_clone = watch_list.clone();
 
     // Bridge: sync notify events → async channel
@@ -98,17 +103,24 @@ pub async fn run_file_watcher(
     tokio::spawn(async move {
         let mut watcher = watcher;
         let mut file_states = file_states;
+        let mut rejected_paths = rejected_paths;
 
         loop {
             // Check if new paths were added to watch_list since last iteration
             {
                 let list = watch_list_clone.read().unwrap();
                 for path in list.iter() {
-                    if !file_states.contains_key(path) {
-                        let _ = watcher.watch(path, RecursiveMode::NonRecursive);
-                        if let Some(state) = open_tail(path) {
+                    if file_states.contains_key(path) || rejected_paths.contains(path) {
+                        continue;
+                    }
+                    let _ = watcher.watch(path, RecursiveMode::NonRecursive);
+                    match open_tail(path) {
+                        Some(state) => {
                             eprintln!("BlackBox file_watcher: watching {}", path.display());
                             file_states.insert(path.clone(), state);
+                        }
+                        None => {
+                            rejected_paths.insert(path.clone());
                         }
                     }
                 }
@@ -125,7 +137,7 @@ pub async fn run_file_watcher(
 
             if let Some(path) = changed_path {
                 if let Some(state) = file_states.get_mut(&path) {
-                    read_new_lines(state, &buf_clone, &drain_clone, &path);
+                    read_new_lines(state, &buf_clone, &drain_clone, &structured_clone, &path);
                 }
             }
         }
@@ -154,6 +166,7 @@ fn read_new_lines(
     state: &mut WatchedFile,
     buf: &SharedBuffer,
     drain: &SharedDrainState,
+    structured: &SharedStructuredStore,
     canonical_path: &Path,
 ) {
     let mut file = match std::fs::File::open(&state.path) {
@@ -201,7 +214,7 @@ fn read_new_lines(
             break;
         }
         if !line.trim().is_empty() {
-            push_line_and_drain(buf, drain, line.to_string(), Some(source_tag.clone()));
+            push_line_and_drain(buf, drain, structured, line.to_string(), Some(source_tag.clone()));
             count += 1;
         }
     }
