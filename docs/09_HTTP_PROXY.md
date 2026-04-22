@@ -1,3 +1,10 @@
+---
+title: 09 HTTP Proxy Integration
+synopsis: Detailed documentation for the built-in HTTP proxy (:8769) for intercepting API errors.
+agent_guidance: Use this when asked to monitor network traffic or when explaining how to set up HTTP_PROXY for an application.
+related: [04_DOCKER_AND_SYSTEM.md, 07_TESTING_AND_SECURITY.md]
+---
+
 # 09. HTTP Proxy Integration
 
 > [!IMPORTANT]

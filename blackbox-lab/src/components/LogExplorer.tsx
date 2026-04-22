@@ -460,8 +460,8 @@ export const LogExplorer: React.FC<LogExplorerProps> = ({
             Live
           </span>
           {mode === 'raw' && <span>{raw.length} lines</span>}
-          {mode === 'compressed' && <span>{compressed?.clusters.length ?? 0} clusters · {compressed?.stack_traces.length ?? 0} traces</span>}
-          {mode === 'docker' && <span>{docker?.containers.length ?? 0} containers</span>}
+          {mode === 'compressed' && <span>{compressed?.clusters?.length ?? 0} clusters · {compressed?.stack_traces?.length ?? 0} traces</span>}
+          {mode === 'docker' && <span>{docker?.containers?.length ?? 0} containers</span>}
           {mode === 'postmortem' && <span>{postmortem?.window_minutes ?? 30}m window</span>}
         </div>
         <span className="mono" style={{ color: 'var(--accent-cyan)', opacity: 0.5, fontSize: '0.62rem' }}>

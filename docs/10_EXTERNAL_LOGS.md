@@ -1,3 +1,10 @@
+---
+title: 10 External Logs (File Watcher)
+synopsis: File monitoring system (watch_log_file) using the notify crate for "tail -f" functionality.
+agent_guidance: Read this if you need to monitor files that don't output to stdout, like database or system logs.
+related: [01_ARCHITECTURE.md, 06_IDE_INTEGRATION.md]
+---
+
 # 10. External Logs (File Watcher)
 
 > [!IMPORTANT]

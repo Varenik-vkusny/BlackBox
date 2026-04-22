@@ -1,5 +1,12 @@
 # BlackBox — Phase 1 & 2 Workspace Guide
 
+> [!IMPORTANT]
+> **🤖 AI Operational Meta-Rules:**
+> 1. **Context Initialization**: Every agent session MUST begin by reading this `CLAUDE.md` file.
+> 2. **Knowledge Base (KB)**: The `docs/` folder is the primary source of project truth.
+> 3. **Usage Pattern**: Do not read all documents. Inspect filenames and headers (Metadata) to decide what to read based on the task (exactly like identifying a Skill).
+> 4. **Doc Maintenance**: When updating core logic or architecture, ensure corresponding files in `docs/` are synchronized.
+
 ## Phase 1 Requirements (All Complete ✅)
 
 | Requirement | Implementation | Status |

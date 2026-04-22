@@ -18,6 +18,13 @@ use blackbox_core::types::{StatusResponse, ProjectKind};
 #[derive(Debug, Deserialize)]
 pub struct LogParams {
     pub limit: Option<usize>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpanParams {
+    pub span_id: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +46,10 @@ fn build_router(state: DaemonState) -> Router {
         .route("/api/diff", get(get_diff))
         .route("/api/postmortem", get(get_postmortem_handler))
         .route("/api/correlated", get(get_correlated_handler))
+        .route("/api/http-errors", get(get_http_errors_handler))
+        .route("/api/watched", get(get_watched_handler))
+        .route("/api/commits", get(get_commits_handler))
+        .route("/api/structured", get(get_structured_handler))
         .route("/api/inject", post(inject_log))
         .route("/api/clear", post(clear_logs))
         .route("/api/watch", post(watch_file))
@@ -104,8 +115,15 @@ async fn get_terminal_logs(
     Json(LogResponse { lines })
 }
 
-async fn get_compressed_logs(State(state): State<DaemonState>) -> impl IntoResponse {
-    let res = crate::mcp::tools::handle_tools_call(None, Some(serde_json::json!({"name": "get_compressed_errors"})), &state).await;
+async fn get_compressed_logs(
+    State(state): State<DaemonState>,
+    Query(params): Query<LogParams>,
+) -> impl IntoResponse {
+    let args = match params.source {
+        Some(s) => serde_json::json!({"source": s, "limit": params.limit.unwrap_or(50)}),
+        None => serde_json::json!({"limit": params.limit.unwrap_or(50)}),
+    };
+    let res = crate::mcp::tools::handle_tools_call(None, Some(serde_json::json!({"name": "get_compressed_errors", "arguments": args})), &state).await;
     match res.result {
         Some(v) => Json(v),
         None => Json(serde_json::json!({ "error": "drain failed" }))
@@ -124,8 +142,15 @@ async fn get_docker_logs(State(state): State<DaemonState>) -> impl IntoResponse 
     }))
 }
 
-async fn get_diff(State(state): State<DaemonState>) -> impl IntoResponse {
-    let res = crate::mcp::tools::handle_tools_call(None, Some(serde_json::json!({"name": "get_contextual_diff"})), &state).await;
+async fn get_diff(
+    State(state): State<DaemonState>,
+    Query(params): Query<LogParams>,
+) -> impl IntoResponse {
+    let args = match params.source {
+        Some(s) => serde_json::json!({"terminal": s}),
+        None => serde_json::json!({}),
+    };
+    let res = crate::mcp::tools::handle_tools_call(None, Some(serde_json::json!({"name": "get_contextual_diff", "arguments": args})), &state).await;
     match res.result {
         Some(v) => Json(v),
         None => Json(serde_json::json!({ "error": "diff failed" }))
@@ -214,6 +239,69 @@ async fn watch_file(
     }
     list.push(abs_path);
     (StatusCode::OK, Json(serde_json::json!({ "status": "watching", "path": payload.path })))
+}
+
+async fn get_http_errors_handler(
+    State(state): State<DaemonState>,
+    Query(params): Query<LogParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50) as u64;
+    let res = crate::mcp::tools::handle_tools_call(
+        None,
+        Some(serde_json::json!({"name": "get_http_errors", "arguments": {"limit": limit}})),
+        &state,
+    )
+    .await;
+    match res.result {
+        Some(v) => Json(v),
+        None => Json(serde_json::json!({ "error": "http_errors failed" })),
+    }
+}
+
+async fn get_watched_handler(State(state): State<DaemonState>) -> impl IntoResponse {
+    let res = crate::mcp::tools::handle_tools_call(
+        None,
+        Some(serde_json::json!({"name": "get_watched_files"})),
+        &state,
+    )
+    .await;
+    match res.result {
+        Some(v) => Json(v),
+        None => Json(serde_json::json!({ "error": "watched_files failed" })),
+    }
+}
+
+async fn get_commits_handler(
+    State(state): State<DaemonState>,
+    Query(params): Query<LogParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(20) as u64;
+    let res = crate::mcp::tools::handle_tools_call(
+        None,
+        Some(serde_json::json!({"name": "get_recent_commits", "arguments": {"limit": limit}})),
+        &state,
+    )
+    .await;
+    match res.result {
+        Some(v) => Json(v),
+        None => Json(serde_json::json!({ "error": "commits failed" })),
+    }
+}
+
+async fn get_structured_handler(
+    State(state): State<DaemonState>,
+    Query(params): Query<SpanParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50) as u64;
+    let args = match params.span_id {
+        Some(sid) => serde_json::json!({"name": "get_structured_context", "arguments": {"span_id": sid, "limit": limit}}),
+        None => serde_json::json!({"name": "get_structured_context", "arguments": {"limit": limit}}),
+    };
+    let res = crate::mcp::tools::handle_tools_call(None, Some(args), &state).await;
+    match res.result {
+        Some(v) => Json(v),
+        None => Json(serde_json::json!({ "error": "structured failed" })),
+    }
 }
 
 // ── MCP Streamable HTTP transport ────────────────────────────────────────────

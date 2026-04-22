@@ -1,26 +1,31 @@
+---
+title: 06 IDE Integration (VS Code Bridge)
+synopsis: Methods for capturing terminal data: VS Code bridge vs. Native PTY capture (blackbox-run) and Shell Hooks.
+agent_guidance: Relevant when diagnosing why logs aren't appearing or when choosing between blackbox-run and general terminal capture.
+related: [01_ARCHITECTURE.md, 10_EXTERNAL_LOGS.md]
+---
+
 # 06. IDE Integration (VS Code Bridge)
 
 > [!IMPORTANT]
 > **Repomix Context Command:**
 > `repomix --include "vscode-extension/src/**" --output vscode_context.txt`
 
-Интеграция с IDE — основной источник данных для BlackBox в текущей реализации.
+Хотя VS Code является удобным источником данных, BlackBox в Фазе 3 поддерживает полностью автономный захват данных на системном уровне.
 
-## Extension Logic
+## 1. VS Code Bridge (Legacy-Hybrid)
 Плагин BlackBox для VS Code минималистичен и спроектирован для нулевого влияния на производительность редактора.
 
-*   **API**: Использует (предложенное) API `window.onDidWriteTerminalData`. Это позволяет получать именно те байты, которые выводятся в терминал VS Code, включая вывод от запускаемых тестов, серверов и CLI утилит.
-*   **Passive Monitoring**: Плагин не "залезает" в код файлов и не следит за курсором. Он только транслирует то, что разработчик и так видит на экране в нижней панели редактора.
+*   **API**: Использует (предложенное) API `window.onDidWriteTerminalData`. Это позволяет получать именно те байты, которые выводятся в терминал VS Code.
+*   **Bridge Protocol**: Связь через **TCP сокет (localhost:8765)**.
 
-## Bridge Protocol
-Связь между VS Code и Rust-демоном осуществляется через **TCP сокет (localhost:8765)**.
+## 2. Native Aggregation (Phase 3)
+Для работы без плагинов BlackBox использует нативные механизмы захвата.
 
-1.  **Direct Streaming**: Как только данные появляются в терминале, плагин записывает их в сокет.
-2.  **Line Termination**: Для надежности плагин гарантирует, что каждая отправка заканчивается символом новой строки, чтобы `BufRead` на стороне Rust мог корректно разделять логи.
-3.  **Robustness**: Реализована логика автоматического переподключения (Exponential Backoff с джиттером). Если демон выключен, плагин будет бесшумно пытаться подключиться в фоне (интервал от 1 до 30 секунд), не мешая работе разработчика.
+*   **PTY Capture (`portable-pty`)**: Демон может напрямую запускать процессы и захватывать их вывод через управляющий терминал (ConPTY на Windows). Это используется в утилите `blackbox-run`.
+*   **Shell Hooks**: Настройка `.zshrc` или `.bashrc` для автоматической пересылки всех команд и их вывода в BlackBox через `curl` или `nc` на порт 8765.
 
 ## Security & Privacy
-Причина выбора такого подхода (Terminal Data Only):
-*   **Isolation**: Мы не читаем открытые вкладки или буфер обмена. Только то, что было явно запущено в терминале.
-*   **Masking on Source**: Хотя маскировка PII происходит в демоне, сам факт использования TCP сокета на localhost гарантирует, что данные не покидают машину разработчика до тех пор, пока он сам не отправит их в AI через MCP.
-*   **Transparency**: Весь поток данных из IDE в BlackBox можно увидеть, подключившись к порту 8765 любым TCP-клиентом.
+Причина выбора такого подхода:
+*   **Isolation**: Мы не читаем открытые вкладки. Только то, что было явно выведено в терминал.
+*   **Visibility**: Весь поток данных из IDE в BlackBox можно увидеть, подключившись к порту 8765.

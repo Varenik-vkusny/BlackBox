@@ -1,3 +1,10 @@
+---
+title: 02 MCP Tools Reference
+synopsis: Categorized catalog of all available Model Context Protocol tools (Core, Diagnostics, Infrastructure, Tracking, Advanced).
+agent_guidance: Consult this whenever you need to know which tool to use for a specific diagnostic task or what parameters are available.
+related: [03_SCANNERS_LOGIC.md, 07_TESTING_AND_SECURITY.md]
+---
+
 # 02. MCP Tools Reference
 
 > [!IMPORTANT]

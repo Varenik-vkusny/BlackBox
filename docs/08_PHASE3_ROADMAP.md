@@ -1,3 +1,10 @@
+---
+title: 08 Phase 3 Roadmap (COMPLETED)
+synopsis: History of Phase 3 accomplishments and the backlog for Phase 4 (Intelligence, SQLite storage, Distributed context).
+agent_guidance: Use this to understand what features are currently implemented vs. planned "backlog" features.
+related: []
+---
+
 # 08. Phase 3 Roadmap (COMPLETED)
 
 BlackBox Phase 3 завершена. Основные цели по нативному перехвату, расширенной аналитике и сетевому проксированию достигнуты.

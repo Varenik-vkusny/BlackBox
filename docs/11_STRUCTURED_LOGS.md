@@ -1,3 +1,10 @@
+---
+title: 11 Structured Logs & Tracing
+synopsis: Support for JSON logging, trace-ID/span-ID indexing, and breadcrumb navigation.
+agent_guidance: Consult this when dealing with microservices or structured logging output (Pino, Tracing, Structlog) to leverage deep indexing.
+related: [01_ARCHITECTURE.md, 03_SCANNERS_LOGIC.md]
+---
+
 # 11. Structured Logs & Tracing
 
 > [!IMPORTANT]

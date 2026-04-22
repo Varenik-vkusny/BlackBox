@@ -1,10 +1,17 @@
+---
+title: 05 Lab and UI
+synopsis: Overview of the BlackBox Lab React/Vite dashboard and the Admin API.
+agent_guidance: Consult this to understand how the user-visible dashboard interacts with the daemon's API.
+related: [06_IDE_INTEGRATION.md, 09_HTTP_PROXY.md]
+---
+
 # 05. Lab and UI
 
 > [!IMPORTANT]
 > **Repomix Context Command:**
 > `repomix --include "blackbox-lab/src/**" --output ui_context.txt`
 
-Для мониторинга работы BlackBox и проверки того, что видит ИИ, реализованы три интерфейса.
+Для мониторинга работы BlackBox и проверки того, что видит ИИ, реализован основной веб-интерфейс.
 
 ## 1. BlackBox Lab (Web Interface)
 Веб-интерфейс на **React + Vite**. Предназначен для визуализации накопленного контекста.

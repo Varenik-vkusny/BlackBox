@@ -1,3 +1,10 @@
+---
+title: 04 Docker and System Integration
+synopsis: Deep dive into Docker integration using Bollard, smart log filtering, and cross-source correlation.
+agent_guidance: Read this when troubleshooting Docker desktop connectivity or when using get_correlated_errors to link container events with terminal logs.
+related: [02_MCP_TOOLS_REFERENCE.md, 03_SCANNERS_LOGIC.md]
+---
+
 # 04. Docker and System Integration
 
 > [!IMPORTANT]
@@ -8,7 +15,7 @@
 BlackBox интегрируется с Docker Engine через библиотеку **Bollard**.
 *   **Discovery**: Каждые 10 секунд демон проверяет наличие новых контейнеров.
 *   **Resilience**: Если контейнер упал или Docker Desktop был перезапущен, таски мониторинга автоматически восстанавливаются без перезагрузки самого демона.
-*   **Log Demuxing**: Корректное разделение `stdout` и `stderr` потоков с разбором 8-байтовых заголовков Docker.
+*   **Log Demuxing**: Корректное разделение `stdout` и `stderr` потоков с использованием нативного demuxing в библиотеке `bollard`.
 
 ## 2. Smart Filtering (`log_filter.rs`)
 BlackBox не хранит все логи контейнеров. Сохраняются только:

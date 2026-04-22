@@ -1,3 +1,10 @@
+---
+title: 07 Testing and Security
+synopsis: Integration testing strategy and multi-layer security (PII masking, TypedContext XML guard, Local-only networking).
+agent_guidance: Essential for understanding security constraints and how to verify if a feature is working correctly without manual testing.
+related: [01_ARCHITECTURE.md, 03_SCANNERS_LOGIC.md]
+---
+
 # 07. Testing and Security
 
 > [!IMPORTANT]

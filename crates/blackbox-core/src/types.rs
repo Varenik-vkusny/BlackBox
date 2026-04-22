@@ -23,6 +23,8 @@ pub struct LogCluster {
     pub example: String,
     /// Detected log level ("error", "warn", "fatal"), None for unclassified.
     pub level: Option<String>,
+    /// Sources (containers/terminals) where this cluster has been seen.
+    pub sources: Vec<String>,
 }
 
 /// A parsed stack frame extracted from terminal output.

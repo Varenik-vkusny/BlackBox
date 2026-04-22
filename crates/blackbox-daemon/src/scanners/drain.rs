@@ -31,9 +31,18 @@ pub fn ingest_line(state: &SharedDrainState, line: &LogLine) {
     if tokens.is_empty() {
         return;
     }
+    println!("Drain: ingesting line: {} (source: {:?})", line.text, line.source_terminal);
     let level = detect_level(&line.text);
+    // println!("Drain: detected level: {:?}", level);
     let mut guard = state.write().unwrap();
-    let bucket = guard.prefix_tree.entry(tokens.len()).or_default();
+    // Evict oldest cluster by last_seen_ms when at cap BEFORE taking bucket mutable reference.
+    if guard.total >= CLUSTER_CAP {
+        evict_oldest(&mut guard.prefix_tree);
+        guard.total -= 1;
+    }
+
+    let token_len = tokens.len();
+    let bucket = guard.prefix_tree.entry(token_len).or_default();
 
     // Find best matching cluster in this token-count bucket.
     let best = bucket
@@ -47,6 +56,7 @@ pub fn ingest_line(state: &SharedDrainState, line: &LogLine) {
     if let Some(cluster) = best {
         let cluster_tokens = tokenize(&cluster.pattern);
         if similarity(&cluster_tokens, &tokens) >= SIMILARITY_THRESHOLD {
+            // println!("Drain: matched existing cluster: {}", cluster.pattern);
             // Update existing cluster: merge variable tokens with wildcard.
             cluster.pattern = merge_pattern(&cluster_tokens, &tokens);
             cluster.count += 1;
@@ -54,17 +64,17 @@ pub fn ingest_line(state: &SharedDrainState, line: &LogLine) {
             if level.is_some() && cluster.level.is_none() {
                 cluster.level = level;
             }
+            if let Some(source) = &line.source_terminal {
+                if !cluster.sources.contains(source) {
+                    cluster.sources.push(source.clone());
+                }
+            }
             return;
         }
     }
 
-    // Evict oldest cluster by last_seen_ms when at cap.
-    if guard.total >= CLUSTER_CAP {
-        evict_oldest(&mut guard.prefix_tree);
-        guard.total -= 1;
-    }
-
-    let bucket = guard.prefix_tree.entry(tokens.len()).or_default();
+    let sources = line.source_terminal.clone().map(|s| vec![s]).unwrap_or_default();
+    // println!("Drain: creating NEW cluster for: {} (level: {:?}, sources: {:?})", line.text, level, sources);
     bucket.push(LogCluster {
         pattern: line.text.clone(),
         count: 1,
@@ -72,18 +82,30 @@ pub fn ingest_line(state: &SharedDrainState, line: &LogLine) {
         last_seen_ms: line.timestamp_ms,
         example: line.text.clone(),
         level,
+        sources,
     });
     guard.total += 1;
 }
 
 /// Return clusters where level is set, sorted by count descending.
-pub fn get_error_clusters(state: &SharedDrainState, limit: usize) -> Vec<LogCluster> {
+pub fn get_error_clusters(
+    state: &SharedDrainState,
+    limit: usize,
+    source_filter: Option<&str>,
+) -> Vec<LogCluster> {
     let guard = state.read().unwrap();
     let mut result: Vec<LogCluster> = guard
         .prefix_tree
         .values()
         .flat_map(|bucket| bucket.iter())
         .filter(|c| c.level.is_some())
+        .filter(|c| {
+            if let Some(f) = source_filter {
+                c.sources.iter().any(|s| s == f)
+            } else {
+                true
+            }
+        })
         .cloned()
         .collect();
     result.sort_by(|a, b| b.count.cmp(&a.count));
@@ -179,9 +201,23 @@ mod tests {
         for _ in 0..10 {
             ingest_line(&state, &make_line("error: connection refused to 127.0.0.1"));
         }
-        let clusters = get_error_clusters(&state, 100);
+        let clusters = get_error_clusters(&state, 100, None);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].count, 10);
+    }
+
+    #[test]
+    fn source_filtering_works() {
+        let state = new_drain_state();
+        ingest_line(&state, &LogLine { text: "error from redis".into(), timestamp_ms: 100, source_terminal: Some("bb-redis".into()) });
+        ingest_line(&state, &LogLine { text: "error from postgres".into(), timestamp_ms: 101, source_terminal: Some("bb-postgres".into()) });
+
+        let all = get_error_clusters(&state, 10, None);
+        assert_eq!(all.len(), 2);
+
+        let redis = get_error_clusters(&state, 10, Some("bb-redis"));
+        assert_eq!(redis.len(), 1);
+        assert!(redis[0].pattern.contains("redis"));
     }
 
     #[test]
@@ -189,7 +225,7 @@ mod tests {
         let state = new_drain_state();
         ingest_line(&state, &make_line("error: connection refused to 127.0.0.1"));
         ingest_line(&state, &make_line("warn: disk space low on /dev/sda1"));
-        let clusters = get_error_clusters(&state, 100);
+        let clusters = get_error_clusters(&state, 100, None);
         assert_eq!(clusters.len(), 2);
     }
 
@@ -211,7 +247,7 @@ mod tests {
         let state = new_drain_state();
         ingest_line(&state, &make_line("error: timeout connecting to 10.0.0.1"));
         ingest_line(&state, &make_line("error: timeout connecting to 10.0.0.2"));
-        let clusters = get_error_clusters(&state, 100);
+        let clusters = get_error_clusters(&state, 100, None);
         assert_eq!(clusters.len(), 1);
         assert!(clusters[0].pattern.contains('*'), "pattern should have wildcard: {}", clusters[0].pattern);
     }

@@ -1,3 +1,10 @@
+---
+title: 01 Architecture
+synopsis: High-level overview of the BlackBox "Flight Recorder" system, its components (Rust daemon, TCP bridge, HTTP proxy), and data flow.
+agent_guidance: Use this to understand how the whole system fits together, how data moves from capture layers to the AI, and the internal structure of the Rust daemon.
+related: [02_MCP_TOOLS_REFERENCE.md, 03_SCANNERS_LOGIC.md]
+---
+
 # 01. Architecture
 
 > [!IMPORTANT]
@@ -14,14 +21,17 @@ BlackBox **пассивно** агрегирует системные поток
 
 ```mermaid
 graph TD
-    subgraph "IDE Layer"
+    subgraph "Capture Layers"
         VS["VS Code Extension"]
+        CLI["CLI (blackbox-run)"]
+        SH["Shell Hooks"]
     end
 
     subgraph "BlackBox Daemon (Rust)"
         TB["TCP Bridge (:8765)"]
         HP["HTTP Proxy (:8769)"]
         FW["File Watcher"]
+        PTY["Native PTY Capture"]
         DS["DaemonState (Shared)"]
         RB["RingBuffer (5000 lines)"]
         DC["Drain Clustering"]
@@ -40,9 +50,12 @@ graph TD
     end
 
     VS -- "Terminal Data (TCP)" --> TB
+    CLI -- "Spawn/PTY" --> PTY
+    SH -- "TCP/HTTP" --> TB
     Network -- "HTTP Proxy" --> HP
     Files -- "inotify/Notify" --> FW
     
+    PTY --> RB
     TB --> RB
     HP --> HS
     FW --> RB

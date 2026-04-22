@@ -25,9 +25,9 @@ if (-not (Test-Path $exe)) {
 # Kill existing instance on port 8768 if already running
 $existing = Get-NetTCPConnection -LocalPort 8768 -State Listen -ErrorAction SilentlyContinue
 if ($existing) {
-    $pid = $existing.OwningProcess
-    Write-Host "Stopping existing daemon (PID $pid)..."
-    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    $daemonPid = $existing.OwningProcess
+    Write-Host "Stopping existing daemon (PID $daemonPid)..."
+    Stop-Process -Id $daemonPid -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
 }
 

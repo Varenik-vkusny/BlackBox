@@ -1,3 +1,10 @@
+---
+title: 03 Scanners Logic
+synopsis: Details on how BlackBox processes data: Drain clustering, stack trace parsing (Rust, Python, Node, Java), Git state, manifest detection, and PII masking.
+agent_guidance: Use this to understand how "raw" terminal output is transformed into structured insights like clusters or stack traces.
+related: [04_DOCKER_AND_SYSTEM.md, 07_TESTING_AND_SECURITY.md]
+---
+
 # 03. Scanners Logic
 
 > [!IMPORTANT]

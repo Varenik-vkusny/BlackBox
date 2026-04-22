@@ -33,7 +33,7 @@ pub async fn handle_tools_call(
         "get_project_metadata" => get_project_metadata(state).await,
         "read_file" => read_file(state, &args),
         "get_compressed_errors" => get_compressed_errors(state, &args).await,
-        "get_contextual_diff" => get_contextual_diff(state).await,
+        "get_contextual_diff" => get_contextual_diff(state, &args).await,
         "get_container_logs" => get_container_logs(state, &args).await,
         "get_postmortem" => get_postmortem(state, &args).await,
         "get_correlated_errors" => get_correlated_errors(state, &args).await,
@@ -75,10 +75,14 @@ fn collect_terminal_buffer_data(state: &DaemonState, n: usize, terminal: Option<
     json!({ "content": output, "lines_returned": lines.len(), "terminals": terminals })
 }
 
-async fn collect_compressed_errors_data(state: &DaemonState, limit: usize) -> Value {
-    let clusters = get_error_clusters(&state.drain, limit);
+async fn collect_compressed_errors_data(
+    state: &DaemonState,
+    limit: usize,
+    source: Option<&str>,
+) -> Value {
+    let clusters = get_error_clusters(&state.drain, limit, source);
     let total = total_error_line_count(&state.drain);
-    let lines = get_last_n(&state.buf, 500, None);
+    let lines = get_last_n(&state.buf, 500, source);
     let stack_traces = tokio::task::spawn_blocking(move || extract_stack_traces(&lines))
         .await
         .unwrap_or_default();
@@ -190,7 +194,8 @@ async fn get_compressed_errors(
     args: &Value,
 ) -> Value {
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-    let data = collect_compressed_errors_data(state, limit).await;
+    let source = args["source"].as_str();
+    let data = collect_compressed_errors_data(state, limit, source).await;
 
     let has_clusters = data["clusters"].as_array().map_or(false, |a| !a.is_empty());
     let has_traces = data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
@@ -223,9 +228,10 @@ async fn get_compressed_errors(
     data
 }
 
-async fn get_contextual_diff(state: &DaemonState) -> Value {
+async fn get_contextual_diff(state: &DaemonState, args: &Value) -> Value {
     let cwd = state.cwd.clone();
-    let lines = get_last_n(&state.buf, 500, None);
+    let terminal = args["terminal"].as_str();
+    let lines = get_last_n(&state.buf, 500, terminal);
 
     let diff_result = tokio::task::spawn_blocking(move || {
         let traces = extract_stack_traces(&lines);
@@ -269,7 +275,7 @@ async fn get_contextual_diff(state: &DaemonState) -> Value {
     }
 
     // Diff was empty — fall back to compressed errors for useful context.
-    let err_data = collect_compressed_errors_data(state, 50).await;
+    let err_data = collect_compressed_errors_data(state, 50, terminal).await;
     let has_clusters = err_data["clusters"].as_array().map_or(false, |a| !a.is_empty());
     let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
 
@@ -343,7 +349,7 @@ async fn get_container_logs(state: &DaemonState, args: &Value) -> Value {
     }
 
     // Docker not reachable — fall back to compressed errors then terminal buffer.
-    let err_data = collect_compressed_errors_data(state, 50).await;
+    let err_data = collect_compressed_errors_data(state, 50, container_id).await;
     let has_clusters = err_data["clusters"].as_array().map_or(false, |a| !a.is_empty());
     let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
 
