@@ -18,3 +18,4 @@ bollard = "0.17"
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
+criterion = "0.5"

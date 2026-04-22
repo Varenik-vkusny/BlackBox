@@ -88,11 +88,16 @@
 - `daemon_state.rs`: single `DaemonState` struct (`buf`, `drain`, `error_store`, `cwd`, `start_time`) — `Clone` is cheap, all fields are `Arc` or `Copy`
 - Thread `DaemonState` through tasks by cloning; avoids growing function-argument lists
 
-### Drain Algorithm (`scanners/drain.rs`)
-- `DrainState { prefix_tree: HashMap<usize, Vec<LogCluster>> }` — keyed by token count
+### Drain3 Algorithm (`scanners/drain.rs`)
+- `DrainState { roots: HashMap<usize, TreeNode> }` — token-count roots → Trie nodes → leaf `Vec<LogCluster>`
+- **Pre-masking** (`OnceLock<Regex>`), applied in order (most specific first):
+  - Timestamps → `<TIMESTAMP>`, URLs → `<URL>`, Emails → `<EMAIL>`
+  - UUIDs → `<UUID>`, IPs → `<IP>`, Git SHAs → `<GIT_SHA>`
+  - Paths → `<PATH>`, hex literals → `<HEX>`, numbers → `<NUM>`
+- Trie depth: 4 tokens max; routes line to a small leaf cluster list instead of linear bucket scan
 - Similarity = `matching_tokens / token_count`; threshold 0.5; wildcards stored as `*`
 - `push_line_and_drain(buf, drain, line)` in `buffer.rs` keeps both in sync
-- Cluster cap: 1000; evict oldest by `last_seen_ms`
+- Cluster cap: 1000; evict oldest by `last_seen_ms` via DFS scan across trie
 
 ### Stack Trace Parser (`scanners/stacktrace.rs`)
 - State-machine per language: Rust panic / Python Traceback / Node.js Error / Java Exception

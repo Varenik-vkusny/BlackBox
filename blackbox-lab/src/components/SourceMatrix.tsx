@@ -249,34 +249,6 @@ export function SourceMatrix({
         </>
       )}
 
-      {/* ── Git info ── */}
-      {status?.git_branch && (
-        <>
-          <div className="source-section-divider" />
-          <div className="source-section" style={{ paddingBottom: '0.5rem' }}>
-            <div style={{
-              padding: '0.4rem 0.6rem',
-              fontSize: '0.62rem',
-              fontFamily: 'JetBrains Mono, monospace',
-              color: 'var(--text-muted)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.35rem',
-            }}>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
-                <path d="M18 9a9 9 0 0 1-9 9" />
-              </svg>
-              {status.git_branch}
-              {status.git_dirty_files > 0 && (
-                <span style={{ color: 'var(--accent-orange)', marginLeft: '0.25rem' }}>
-                  · {status.git_dirty_files} modified
-                </span>
-              )}
-            </div>
-          </div>
-        </>
-      )}
     </div>
   );
 }

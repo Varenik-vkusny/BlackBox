@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type {
   BBStatus,
   LogData,
+  LogLine,
   DiffResponse,
   CompressedResponse,
   DockerResponse,
@@ -27,7 +28,7 @@ function unwrapMcp(data: unknown): unknown {
 
 export function useDaemon() {
   const [status, setStatus] = useState<BBStatus | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [compressed, setCompressed] = useState<CompressedResponse | null>(null);
   const [docker, setDocker] = useState<DockerResponse | null>(null);
   const [diff, setDiff] = useState<DiffResponse | null>(null);
@@ -66,7 +67,7 @@ export function useDaemon() {
     try {
       const res = await fetch(`${API_BASE}/terminal?limit=${limit}`);
       const data: LogData = await res.json();
-      if (isMounted.current) setLogs(data.lines);
+      if (isMounted.current) setLogLines(data.lines);
     } catch (e) { void e; }
   }, []);
 
@@ -176,7 +177,7 @@ export function useDaemon() {
   const clearLogs = useCallback(async () => {
     try {
       await fetch(`${API_BASE}/clear`, { method: 'POST' });
-      setLogs([]);
+      setLogLines([]);
       setCompressed(null);
       setPostmortem(null);
       setCorrelated(null);
@@ -242,9 +243,12 @@ export function useDaemon() {
     fetchWatched, fetchCommits, fetchStructured, fetchDiff
   ]);
 
+  // Derive plain string[] for components that don't need session metadata
+  const logs = useMemo(() => logLines.map(l => l.text), [logLines]);
+
   return {
     // Data
-    status, logs, compressed, docker, diff, postmortem, correlated,
+    status, logs, logLines, compressed, docker, diff, postmortem, correlated,
     httpErrors, watched, commits, structured,
     // UI state
     loading, isPaused, daemonOnline,

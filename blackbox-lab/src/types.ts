@@ -27,8 +27,14 @@ export interface BBStatus {
   has_recent_errors: boolean;
 }
 
+export interface LogLine {
+  text: string;
+  timestamp_ms: number;
+  source_terminal?: string;
+}
+
 export interface LogData {
-  lines: string[];
+  lines: LogLine[];
 }
 
 export interface LogCluster {

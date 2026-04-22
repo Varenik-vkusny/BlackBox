@@ -7,7 +7,6 @@ import { TriageView } from './components/TriageView';
 import { UnifiedStream } from './components/UnifiedStream';
 import { RawLogsView } from './components/RawLogsView';
 import { CorrelationPanel } from './components/CorrelationPanel';
-import { InjectionDrawer } from './components/InjectionDrawer';
 import { useDaemon } from './hooks/useDaemon';
 
 export type DashboardView = 'overview' | 'triage' | 'raw';
@@ -114,22 +113,12 @@ function App() {
         )}
         {view === 'raw' && (
           <RawLogsView
-            logs={daemon.logs}
+            logLines={daemon.logLines}
             docker={daemon.docker}
             httpErrors={daemon.httpErrors}
             onBack={navigateOverview}
           />
         )}
-      </div>
-
-      {/* Zone 4: Injection drawer */}
-      <div className="zone-drawer">
-        <InjectionDrawer
-          onInject={daemon.injectLog}
-          onClear={daemon.clearLogs}
-          isPaused={daemon.isPaused}
-          onTogglePause={() => daemon.setIsPaused(p => !p)}
-        />
       </div>
 
       {/* Correlation panel overlay */}

@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { ArrowLeft, Terminal, Box, Globe } from 'lucide-react';
-import type { DockerResponse, HttpErrorsResponse } from '../types';
+import type { LogLine, DockerResponse, HttpErrorsResponse } from '../types';
 
 interface Props {
-  logs: string[];
+  logLines: LogLine[];
   docker: DockerResponse | null;
   httpErrors: HttpErrorsResponse | null;
   onBack: () => void;
@@ -45,7 +45,7 @@ const METHOD_COLORS: Record<string, string> = {
   PATCH: '#fb923c', DELETE: '#f87171',
 };
 
-// ── Reusable pane ─────────────────────────────────────────────
+// ── Reusable pane shell ───────────────────────────────────────
 
 interface PaneProps {
   title: string;
@@ -58,11 +58,12 @@ interface PaneProps {
   children: React.ReactNode;
   isEmpty: boolean;
   emptyMessage: string;
+  triggerScroll?: number; // increment to trigger auto-scroll
 }
 
 function LogPane({
   title, icon, count, total, accentColor,
-  filter, onFilterChange, children, isEmpty, emptyMessage,
+  filter, onFilterChange, children, isEmpty, emptyMessage, triggerScroll,
 }: PaneProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -71,7 +72,7 @@ function LogPane({
     if (autoScroll && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [count, autoScroll]);
+  }, [triggerScroll, autoScroll]);
 
   return (
     <div className="log-pane" style={{ '--pane-accent': accentColor } as React.CSSProperties}>
@@ -92,10 +93,7 @@ function LogPane({
             spellCheck={false}
           />
           {filter && (
-            <button
-              onClick={() => onFilterChange('')}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0, fontSize: '0.75rem', lineHeight: 1 }}
-            >✕</button>
+            <button onClick={() => onFilterChange('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0, fontSize: '0.75rem', lineHeight: 1 }}>✕</button>
           )}
         </div>
       </div>
@@ -126,36 +124,42 @@ function LogPane({
   );
 }
 
-// ── Terminal pane ─────────────────────────────────────────────
+// ── Terminal pane (one per shell session) ─────────────────────
 
-function TerminalPane({ logs, filter, onFilterChange }: {
-  logs: string[];
+function TerminalSessionPane({ sessionName, lines, filter, onFilterChange }: {
+  sessionName: string;
+  lines: LogLine[];
   filter: string;
   onFilterChange: (v: string) => void;
 }) {
   const filtered = useMemo(() => {
-    if (!filter) return logs;
+    if (!filter) return lines;
     const q = filter.toLowerCase();
-    return logs.filter(l => l.toLowerCase().includes(q));
-  }, [logs, filter]);
+    return lines.filter(l => l.text.toLowerCase().includes(q));
+  }, [lines, filter]);
+
+  const label = sessionName || 'injected';
+  const isInjected = !sessionName;
 
   return (
     <LogPane
-      title="Terminal"
+      title={`Terminal · ${label}`}
       icon={<Terminal size={13} />}
       count={filtered.length}
-      total={logs.length}
-      accentColor="var(--accent-cyan)"
+      total={lines.length}
+      accentColor={isInjected ? 'var(--accent-green)' : 'var(--accent-cyan)'}
       filter={filter}
       onFilterChange={onFilterChange}
       isEmpty={filtered.length === 0}
-      emptyMessage={filter ? `No lines matching "${filter}"` : 'No terminal output captured yet'}
+      emptyMessage={filter ? `No lines matching "${filter}"` : 'No output captured yet'}
+      triggerScroll={lines.length}
     >
       {filtered.map((line, i) => {
-        const lvl = levelOf(line);
+        const lvl = levelOf(line.text);
         return (
           <div key={i} className={`log-pane-line${lvl ? ` lvl-${lvl}` : ''}`}>
-            <span className="lp-text" style={{ color: levelTextColor(lvl) }}>{line}</span>
+            <span className="lp-time">{timeLabel(line.timestamp_ms)}</span>
+            <span className="lp-text" style={{ color: levelTextColor(lvl) }}>{line.text}</span>
           </div>
         );
       })}
@@ -182,7 +186,6 @@ function DockerPane({ docker, filter, onFilterChange }: {
     );
   }, [events, filter]);
 
-  // Try to resolve a short name from the containers list
   function resolveContainerName(id: string): string {
     const short = id.slice(0, 12);
     const match = docker?.containers.find(c => c.includes(short) || short.includes(c.slice(0, 8)));
@@ -206,6 +209,7 @@ function DockerPane({ docker, filter, onFilterChange }: {
           ? `No events matching "${filter}"`
           : 'No Docker events captured'
       }
+      triggerScroll={events.length}
     >
       {filtered.map((ev, i) => {
         const lvl = (ev.level?.toLowerCase() ?? null) as 'error' | 'warn' | null;
@@ -259,6 +263,7 @@ function HttpPane({ httpErrors, filter, onFilterChange }: {
           ? `No requests matching "${filter}"`
           : 'No HTTP errors captured\n4xx/5xx only · route via proxy :8769'
       }
+      triggerScroll={events.length}
     >
       {filtered.map((ev, i) => {
         const is5xx = ev.status >= 500;
@@ -280,13 +285,30 @@ function HttpPane({ httpErrors, filter, onFilterChange }: {
 
 // ── Root ──────────────────────────────────────────────────────
 
-export function RawLogsView({ logs, docker, httpErrors, onBack }: Props) {
-  const [termFilter, setTermFilter] = useState('');
+export function RawLogsView({ logLines, docker, httpErrors, onBack }: Props) {
+  // Group terminal lines by session name. Map preserves insertion order so
+  // sessions appear in the order their first line was captured.
+  const terminalGroups = useMemo(() => {
+    const groups = new Map<string, LogLine[]>();
+    for (const line of logLines) {
+      const key = line.source_terminal ?? '';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(line);
+    }
+    return groups;
+  }, [logLines]);
+
+  // Per-session filter state keyed by session name
+  const [sessionFilters, setSessionFilters] = useState<Record<string, string>>({});
   const [dockerFilter, setDockerFilter] = useState('');
   const [httpFilter, setHttpFilter] = useState('');
 
+  function setSessionFilter(key: string, value: string) {
+    setSessionFilters(prev => ({ ...prev, [key]: value }));
+  }
+
   const totalEntries =
-    logs.length +
+    logLines.length +
     (docker?.events.length ?? 0) +
     (httpErrors?.events.length ?? 0);
 
@@ -298,11 +320,19 @@ export function RawLogsView({ logs, docker, httpErrors, onBack }: Props) {
         </button>
         <span className="raw-logs-title">Raw Logs</span>
         <div style={{ flex: 1 }} />
-        <span className="raw-logs-subtitle">{totalEntries} total entries</span>
+        <span className="raw-logs-subtitle">{totalEntries} total entries · {terminalGroups.size} terminal session{terminalGroups.size !== 1 ? 's' : ''}</span>
       </div>
 
       <div className="raw-logs-panes">
-        <TerminalPane logs={logs} filter={termFilter} onFilterChange={setTermFilter} />
+        {Array.from(terminalGroups.entries()).map(([key, lines]) => (
+          <TerminalSessionPane
+            key={key || '__injected__'}
+            sessionName={key}
+            lines={lines}
+            filter={sessionFilters[key] ?? ''}
+            onFilterChange={v => setSessionFilter(key, v)}
+          />
+        ))}
         <DockerPane docker={docker} filter={dockerFilter} onFilterChange={setDockerFilter} />
         <HttpPane httpErrors={httpErrors} filter={httpFilter} onFilterChange={setHttpFilter} />
       </div>

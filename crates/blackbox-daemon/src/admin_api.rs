@@ -28,8 +28,16 @@ pub struct SpanParams {
 }
 
 #[derive(Serialize)]
+pub struct LogLineResp {
+    pub text: String,
+    pub timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_terminal: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct LogResponse {
-    pub lines: Vec<String>,
+    pub lines: Vec<LogLineResp>,
 }
 
 fn build_router(state: DaemonState) -> Router {
@@ -111,7 +119,11 @@ async fn get_terminal_logs(
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(100);
     let buf = state.buf.ring.read().unwrap();
-    let lines = buf.iter().rev().take(limit).map(|l| l.text.clone()).collect::<Vec<_>>();
+    let lines = buf.iter().rev().take(limit).map(|l| LogLineResp {
+        text: l.text.clone(),
+        timestamp_ms: l.timestamp_ms,
+        source_terminal: l.source_terminal.clone(),
+    }).collect::<Vec<_>>();
     Json(LogResponse { lines })
 }
 

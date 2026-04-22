@@ -11,12 +11,25 @@ related: [04_DOCKER_AND_SYSTEM.md, 07_TESTING_AND_SECURITY.md]
 > **Repomix Context Command:**
 > `repomix --include "crates/blackbox-daemon/src/scanners/**" --output scanners_context.txt`
 
-## 1. Log Clustering (Drain Algorithm)
-Для сжатия логов используется модифицированный алгоритм **Drain**. Он позволяет хранить "шаблон" ошибки вместо тысяч идентичных строк, экономя контекстное окно ИИ.
+## 1. Log Clustering (Drain3 Algorithm)
+Для сжатия логов используется production-ready реализация алгоритма **Drain3**. Она позволяет хранить "шаблон" ошибки вместо тысяч идентичных строк, экономя контекстное окно ИИ.
 
-*   **Logic**: Группировка строк по количеству токенов и схожести (threshold 0.5).
-*   **Wildcarding**: Замена переменных частей (IP, ID, пути) на `*`.
-*   **Result**: 1000 строк `Connection refused to 127.0.0.1:5432` превращаются в один шаблон.
+*   **Pre-masking**: Перед токенизацией динамические значения заменяются статическими токенами (в порядке применения):
+    *   Таймстампы: `2024-01-15T10:30:00Z` → `<TIMESTAMP>`, `Jan 15 10:30:00` → `<TIMESTAMP>`
+    *   URL: `https://api.example.com/v1` → `<URL>`
+    *   Email: `admin@example.com` → `<EMAIL>`
+    *   UUID: `5f4dcc3b-2c00-...` → `<UUID>`
+    *   IP: `192.168.1.1` → `<IP>`
+    *   Git SHA: `a1b2c3d` → `<GIT_SHA>`
+    *   Пути: `/tmp/data.txt`, `C:\Users\file.txt`, `./src/main.rs` → `<PATH>`
+    *   Hex: `0xdeadbeef`, `cafe` → `<HEX>`
+    *   Числа: `8080` → `<NUM>`
+    *   Это уменьшает дисперсию длины шаблонов и повышает точность кластеризации.
+*   **Trie Routing**: Вместо линейного поиска внутри bucket'ов по количеству токенов используется Prefix Tree (Trie) фиксированной глубины (до 4 токенов). Строка маршрутизируется по первым токенам к маленькому листу с кандидатами.
+*   **Similarity**: `matching_tokens / token_count >= 0.5`. Проверяется только на кластерах внутри одного листа Trie.
+*   **Wildcarding**: Отличающиеся токены заменяются на `*`. Благодаря pre-masking IP/UUID/числа не становятся `*`, а сохраняют семантику `<IP>`.
+*   **Cap & Eviction**: Жёсткий лимит 1000 кластеров; при переполнении вытесняется least-recently-used через DFS-обход дерева.
+*   **Result**: 1000 строк `Connection refused to 127.0.0.1:5432` превращаются в один шаблон `Connection refused to <IP>:<NUM>`.
 
 ## 2. Stacktrace Parsers
 Модуль `stacktrace.rs` извлекает структурированную информацию из "сырого" текста терминала.
