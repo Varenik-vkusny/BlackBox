@@ -38,3 +38,4 @@ daemon_test.log*
 .env.*
 !.env.example
 *.local
+.worktrees/
