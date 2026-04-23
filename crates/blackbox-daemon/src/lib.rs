@@ -1,4 +1,5 @@
 pub mod admin_api;
+pub mod assets;
 pub mod buffer;
 pub mod daemon_state;
 pub mod docker;
@@ -9,6 +10,8 @@ pub mod mcp;
 pub mod pii_masker;
 pub mod pty_capture;
 pub mod scanners;
+pub mod setup;
 pub mod structured_store;
 pub mod tcp_bridge;
 pub mod typed_context;
+pub mod update;

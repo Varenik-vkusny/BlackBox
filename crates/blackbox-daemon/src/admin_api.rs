@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use std::net::SocketAddr;
 
+use crate::assets::serve_embedded_file;
 use crate::daemon_state::DaemonState;
 use crate::buffer::{buffer_len, push_line_and_drain};
 use crate::scanners::git::scan_git;
@@ -62,6 +63,7 @@ fn build_router(state: DaemonState) -> Router {
         .route("/api/clear", post(clear_logs))
         .route("/api/watch", post(watch_file))
         .route("/mcp", post(mcp_http_handler))
+        .fallback(serve_embedded_file)
         .layer(cors)
         .with_state(state)
 }
