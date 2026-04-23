@@ -67,8 +67,10 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp ./target/${{ matrix.target }}/release/blackbox-daemon.exe ./target/${{ matrix.target }}/release/blackbox.exe
             7z a ${{ matrix.archive }} ./target/${{ matrix.target }}/release/blackbox.exe
           else
+            cp ./target/${{ matrix.target }}/release/blackbox-daemon ./target/${{ matrix.target }}/release/blackbox
             tar -czf ${{ matrix.archive }} -C ./target/${{ matrix.target }}/release blackbox
           fi
       - uses: actions/upload-artifact@v4
@@ -85,6 +87,7 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+          pattern: blackbox-*
       - uses: softprops/action-gh-release@v1
         with:
           files: artifacts/*
