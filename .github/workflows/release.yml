@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: cd blackbox-lab && npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: blackbox-lab/dist
+
+  build-binaries:
+    needs: build-frontend
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: blackbox-windows-x64.exe
+            archive: blackbox-windows-x64.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: blackbox-macos-x64
+            archive: blackbox-macos-x64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: blackbox-macos-arm64
+            archive: blackbox-macos-arm64.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: blackbox-linux-x64
+            archive: blackbox-linux-x64.tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: blackbox-linux-arm64
+            archive: blackbox-linux-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/blackbox-daemon/assets/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ${{ matrix.archive }} ./target/${{ matrix.target }}/release/blackbox.exe
+          else
+            tar -czf ${{ matrix.archive }} -C ./target/${{ matrix.target }}/release blackbox
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  create-release:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*
+          generate_release_notes: true
