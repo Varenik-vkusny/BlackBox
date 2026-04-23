@@ -16,8 +16,6 @@ pub enum Commands {
         #[arg(long, default_value = "8765")]
         port: u16,
         #[arg(long)]
-        no_ui: bool,
-        #[arg(long)]
         cwd: Option<String>,
         #[arg(long)]
         capture_shell: bool,

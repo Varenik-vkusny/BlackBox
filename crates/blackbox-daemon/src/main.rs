@@ -8,8 +8,10 @@ use blackbox_daemon::http_store;
 use blackbox_daemon::mcp;
 use blackbox_daemon::pty_capture;
 use blackbox_daemon::scanners;
+use blackbox_daemon::setup;
 use blackbox_daemon::structured_store;
 use blackbox_daemon::tcp_bridge;
+use blackbox_daemon::update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,13 +35,37 @@ use clap::Parser;
 /// (Antigravity, blackbox-lab) after an AI session ends.
 const GRACE_PERIOD_SECS: u64 = 300; // 5 minutes
 
+fn first_positional(args: &[String]) -> Option<&str> {
+    let mut i = 1;
+    while i < args.len() {
+        if args[i].starts_with('-') {
+            if !args[i].contains('=') {
+                i += 1; // skip the value of the flag
+            }
+            i += 1;
+        } else {
+            return Some(&args[i]);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let has_subcommand = args.iter().skip(1).any(|a| matches!(a.as_str(), "run" | "setup" | "update"));
+    let has_help = args.iter().skip(1).any(|a| a == "--help" || a == "-h");
+    let first_pos = first_positional(&args);
 
-    let cli = if has_subcommand {
+    let cli = if has_help {
         Cli::parse()
+    } else if let Some(first) = first_pos {
+        if matches!(first, "run" | "setup" | "update") {
+            Cli::parse()
+        } else {
+            let mut with_run = args;
+            with_run.insert(1, "run".to_string());
+            Cli::parse_from(with_run)
+        }
     } else {
         let mut with_run = args;
         with_run.insert(1, "run".to_string());
@@ -48,7 +74,7 @@ async fn main() {
 
     match cli.command {
         None => {
-            // Fallback: no subcommand parsed — use manual arg parsing for backward compat.
+            // Fallback: reachable for direct programmatic use when no subcommand is provided.
             let args: Vec<String> = std::env::args().collect();
             let cwd = parse_arg(&args, "--cwd").map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("Cannot determine current directory")
@@ -60,17 +86,17 @@ async fn main() {
             let shell = parse_arg(&args, "--shell");
             run_daemon(cwd, bridge_port, capture_shell, shell).await;
         }
-        Some(Commands::Run { port, no_ui: _, cwd, capture_shell, shell }) => {
+        Some(Commands::Run { port, cwd, capture_shell, shell }) => {
             let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("Cannot determine current directory")
             });
             run_daemon(cwd, port, capture_shell, shell).await;
         }
         Some(Commands::Setup { auto }) => {
-            eprintln!("setup called (auto={auto})");
+            setup::run_setup(auto);
         }
         Some(Commands::Update) => {
-            eprintln!("update called");
+            update::run_update().await;
         }
     }
 }

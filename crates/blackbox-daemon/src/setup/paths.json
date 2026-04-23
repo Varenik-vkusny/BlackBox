@@ -1,0 +1,44 @@
+{
+  "clients": [
+    {
+      "name": "Claude Code",
+      "id": "claude-code",
+      "paths": {
+        "unix": "~/.claude/settings.json",
+        "windows": "%APPDATA%/Claude/settings.json"
+      }
+    },
+    {
+      "name": "Claude Desktop",
+      "id": "claude-desktop",
+      "paths": {
+        "unix": "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "windows": "%APPDATA%/Claude/claude_desktop_config.json"
+      }
+    },
+    {
+      "name": "Cursor",
+      "id": "cursor",
+      "paths": {
+        "unix": "~/.cursor/mcp.json",
+        "windows": "%USERPROFILE%/.cursor/mcp.json"
+      }
+    },
+    {
+      "name": "Cline",
+      "id": "cline",
+      "paths": {
+        "unix": "~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
+        "windows": "%APPDATA%/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+      }
+    },
+    {
+      "name": "Windsurf",
+      "id": "windsurf",
+      "paths": {
+        "unix": "~/.codeium/windsurf/mcp_config.json",
+        "windows": "%USERPROFILE%/.codeium/windsurf/mcp_config.json"
+      }
+    }
+  ]
+}
