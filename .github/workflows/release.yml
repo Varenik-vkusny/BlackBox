@@ -22,6 +22,7 @@ jobs:
   build-binaries:
     needs: build-frontend
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -32,7 +33,7 @@ jobs:
             target: x86_64-apple-darwin
             artifact: blackbox-macos-x64
             archive: blackbox-macos-x64.tar.gz
-          - os: macos-latest
+          - os: macos-14
             target: aarch64-apple-darwin
             artifact: blackbox-macos-arm64
             archive: blackbox-macos-arm64.tar.gz
@@ -54,7 +55,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
