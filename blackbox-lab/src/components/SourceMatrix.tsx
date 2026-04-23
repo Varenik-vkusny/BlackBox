@@ -1,4 +1,4 @@
-import { Terminal, Box, Globe, File, LayoutDashboard, List } from 'lucide-react';
+import { LayoutDashboard, List, FileText } from 'lucide-react';
 import type { BBStatus, DockerResponse, HttpErrorsResponse, WatchedFilesResponse } from '../types';
 import type { DashboardView } from '../App';
 
@@ -16,27 +16,26 @@ interface Props {
   onNavigateRaw: () => void;
 }
 
-type PulseKind = 'active' | 'error' | 'warning' | 'idle';
+type PulseKind = 'error' | 'warning' | 'idle';
 
 function PulseDot({ kind }: { kind: PulseKind }) {
   return <span className={`source-pulse-dot ${kind}`} />;
 }
 
-// Orange for 1-9 errors; red for ≥10 or critical (panic)
-function errorSeverity(count: number, isCritical = false): PulseKind {
-  if (isCritical || count >= 10) return 'error';
-  if (count > 0) return 'warning';
-  return 'active';
-}
-
-function errorLabel(count: number): string {
-  if (count === 0) return '';
-  return `${count} error${count !== 1 ? 's' : ''}`;
+function SidebarSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="source-section">
+      <div className="source-section-title">{title}</div>
+      {children}
+    </div>
+  );
 }
 
 function NavItem({
-  label, icon, active, onClick,
-}: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void }) {
+  label, active, onClick, icon,
+}: {
+  label: string; active: boolean; onClick: () => void; icon: React.ReactNode;
+}) {
   return (
     <div
       className={`source-item${active ? ' selected' : ''}`}
@@ -44,12 +43,38 @@ function NavItem({
       role="button"
       tabIndex={0}
       onKeyDown={e => e.key === 'Enter' && onClick()}
-      style={{ gap: '0.5rem' }}
     >
-      <span style={{ color: active ? 'var(--accent-cyan)' : 'var(--text-muted)', flexShrink: 0 }}>{icon}</span>
-      <span className="source-item-name" style={{ fontFamily: 'Inter, system-ui, sans-serif', fontSize: '0.7rem' }}>
-        {label}
-      </span>
+      <span style={{ color: 'var(--fg-muted)', flexShrink: 0, display: 'flex' }}>{icon}</span>
+      <span className="source-item-name">{label}</span>
+    </div>
+  );
+}
+
+function SourceItem({
+  name, typeBadge, kind, hasErrors, active, onClick, count,
+}: {
+  name: string;
+  typeBadge: string;
+  kind: PulseKind;
+  hasErrors: boolean;
+  active: boolean;
+  onClick: () => void;
+  count?: string;
+}) {
+  return (
+    <div
+      className={`source-item${hasErrors ? ' has-errors' : ''}${active ? ' selected' : ''}`}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => e.key === 'Enter' && onClick()}
+    >
+      <PulseDot kind={kind} />
+      <span className="source-item-name">{name}</span>
+      <span className="source-item-badge">{typeBadge}</span>
+      {count != null && (
+        <span className="source-item-count" title="Error count">{count}</span>
+      )}
     </div>
   );
 }
@@ -60,8 +85,6 @@ export function SourceMatrix({
   currentView, triageService,
   onNavigateTriage, onNavigateOverview, onNavigateRaw,
 }: Props) {
-  const toggle = (src: string) => onSelectSource(selectedSource === src ? null : src);
-
   const containerErrors: Record<string, number> = {};
   docker?.events?.forEach(e => {
     const lvl = e.level?.toLowerCase();
@@ -76,179 +99,116 @@ export function SourceMatrix({
   const httpTotal = http4xx + http5xx;
 
   const hasPanic = status?.has_recent_errors ?? false;
-  const terminalErrorCount = 0; // buffer_lines is total, not errors; use has_recent_errors as signal
-  const terminalSeverity = errorSeverity(terminalErrorCount, hasPanic);
 
   const showWatched = (watched?.watched_files?.length ?? 0) > 0;
 
   return (
     <div className="source-matrix custom-scrollbar">
-
-      {/* ── View Navigation ── */}
-      <div className="source-section">
-        <div className="source-section-title">
-          <LayoutDashboard size={10} /> Views
-        </div>
+      {/* VIEWS */}
+      <SidebarSection title="Views">
         <NavItem
           label="Overview"
-          icon={<LayoutDashboard size={12} />}
           active={currentView === 'overview'}
           onClick={onNavigateOverview}
+          icon={<LayoutDashboard size={14} />}
+        />
+        <NavItem
+          label="Triage"
+          active={currentView === 'triage'}
+          onClick={() => onNavigateTriage(triageService ?? 'terminal')}
+          icon={<List size={14} />}
         />
         <NavItem
           label="Raw Logs"
-          icon={<List size={12} />}
           active={currentView === 'raw'}
           onClick={onNavigateRaw}
+          icon={<FileText size={14} />}
         />
-      </div>
+      </SidebarSection>
 
       <div className="source-section-divider" />
 
-      {/* ── Terminals ── */}
-      <div className="source-section">
-        <div className="source-section-title">
-          <Terminal size={10} /> Terminal
-        </div>
-
-        <div
-          className={`source-item${hasPanic ? ' has-errors' : ''}${selectedSource === 'terminal' || (currentView === 'triage' && triageService === 'terminal') ? ' selected' : ''}`}
+      {/* SOURCES */}
+      <SidebarSection title="Sources">
+        {/* Terminal */}
+        <SourceItem
+          name="vscode_bridge"
+          typeBadge="terminal"
+          kind={hasPanic ? 'error' : 'idle'}
+          hasErrors={hasPanic}
+          active={selectedSource === 'terminal' || (currentView === 'triage' && triageService === 'terminal')}
           onClick={() => { onSelectSource('terminal'); onNavigateTriage('terminal'); }}
-          role="button"
-          tabIndex={0}
-          onKeyDown={e => e.key === 'Enter' && onNavigateTriage('terminal')}
-        >
-          <PulseDot kind={terminalSeverity} />
-          <span className="source-item-name">vscode_bridge</span>
-          {status && (
-            <span className="source-item-count" title="Total buffered lines">
-              {hasPanic ? 'errors' : `${status.buffer_lines} lines`}
-            </span>
-          )}
-        </div>
-      </div>
+          count={hasPanic ? 'errors' : `${status?.buffer_lines ?? 0} lines`}
+        />
 
-      <div className="source-section-divider" />
-
-      {/* ── Docker ── */}
-      <div className="source-section">
-        <div className="source-section-title">
-          <Box size={10} /> Docker
-          {!docker?.docker_available && (
-            <span style={{ fontSize: '0.55rem', color: 'var(--text-muted)', marginLeft: '0.25rem' }}>(offline)</span>
-          )}
-        </div>
-
+        {/* Docker containers */}
         {!docker?.docker_available || docker.containers.length === 0 ? (
-          <div className="source-item" style={{ cursor: 'default', opacity: 0.45 }}>
-            <PulseDot kind="idle" />
-            <span className="source-item-name" style={{ color: 'var(--text-muted)' }}>
-              {!docker?.docker_available ? 'not connected' : 'no containers'}
-            </span>
-          </div>
+          <SourceItem
+            name={docker?.docker_available ? 'no containers' : 'docker offline'}
+            typeBadge="docker"
+            kind="idle"
+            hasErrors={false}
+            active={false}
+            onClick={() => {}}
+          />
         ) : (
           docker.containers.map(cid => {
             const errCount = containerErrors[cid] ?? 0;
             const short = cid.length > 14 ? cid.slice(0, 14) : cid;
             const src = `docker:${cid}`;
-            const severity = errorSeverity(errCount);
-            const isSelected = selectedSource === src || (currentView === 'triage' && triageService === 'docker' && selectedSource?.includes(cid));
+            const kind: PulseKind = errCount > 0 ? 'error' : 'idle';
             return (
-              <div
+              <SourceItem
                 key={cid}
-                className={`source-item${errCount > 0 ? (severity === 'error' ? ' has-errors' : '') : ''}${isSelected ? ' selected' : ''}`}
+                name={short}
+                typeBadge="docker"
+                kind={kind}
+                hasErrors={errCount > 0}
+                active={!!(selectedSource === src || (currentView === 'triage' && triageService === 'docker' && selectedSource?.includes(cid)))}
                 onClick={() => { onSelectSource(src); onNavigateTriage('docker'); }}
-                role="button"
-                tabIndex={0}
-                onKeyDown={e => e.key === 'Enter' && onSelectSource(src)}
-              >
-                <PulseDot kind={errCount > 0 ? severity : 'active'} />
-                <span className="source-item-name">{short}</span>
-                {errCount > 0 && (
-                  <span
-                    className="source-item-count"
-                    style={{ color: severity === 'error' ? 'var(--accent-red)' : 'var(--accent-orange)' }}
-                  >
-                    {errorLabel(errCount)}
-                  </span>
-                )}
-              </div>
+                count={errCount > 0 ? `${errCount} err` : undefined}
+              />
             );
           })
         )}
-      </div>
 
-      <div className="source-section-divider" />
-
-      {/* ── HTTP Proxy ── */}
-      <div className="source-section">
-        <div className="source-section-title">
-          <Globe size={10} /> Network
-        </div>
-
-        <div
-          className={`source-item${http5xx > 0 ? ' has-errors' : ''}${selectedSource === 'http' || (currentView === 'triage' && triageService === 'http') ? ' selected' : ''}`}
+        {/* HTTP Proxy */}
+        <SourceItem
+          name={`proxy :${httpErrors?.proxy_port ?? 8769}`}
+          typeBadge="network"
+          kind={http5xx > 0 ? 'error' : http4xx > 0 ? 'warning' : 'idle'}
+          hasErrors={http5xx > 0}
+          active={selectedSource === 'http' || (currentView === 'triage' && triageService === 'http')}
           onClick={() => { onSelectSource('http'); onNavigateTriage('http'); }}
-          role="button"
-          tabIndex={0}
-          onKeyDown={e => e.key === 'Enter' && onNavigateTriage('http')}
-        >
-          <PulseDot kind={http5xx > 0 ? 'error' : http4xx > 0 ? 'warning' : 'idle'} />
-          <span className="source-item-name">
-            proxy :{httpErrors?.proxy_port ?? 8769}
-          </span>
-          {httpTotal > 0 && (
-            <span
-              className="source-item-count"
-              style={{ color: http5xx > 0 ? 'var(--accent-red)' : 'var(--accent-orange)' }}
-            >
-              {errorLabel(httpTotal)}
-            </span>
-          )}
-        </div>
+          count={httpTotal > 0 ? `${httpTotal} err` : undefined}
+        />
+      </SidebarSection>
 
-        {/* 4xx / 5xx breakdown — only when there are errors */}
-        {(http4xx > 0 || http5xx > 0) && (
-          <div style={{ paddingLeft: '1.75rem', display: 'flex', gap: '0.5rem', paddingBottom: '0.25rem' }}>
-            {http4xx > 0 && (
-              <span style={{ fontSize: '0.6rem', color: 'var(--accent-orange)', fontFamily: 'JetBrains Mono, monospace' }}>
-                {http4xx}× 4xx
-              </span>
-            )}
-            {http5xx > 0 && (
-              <span style={{ fontSize: '0.6rem', color: 'var(--accent-red)', fontFamily: 'JetBrains Mono, monospace' }}>
-                {http5xx}× 5xx
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* ── Watched Files — only when present ── */}
+      {/* FILES */}
       {showWatched && (
         <>
           <div className="source-section-divider" />
-          <div className="source-section">
-            <div className="source-section-title">
-              <File size={10} /> Watched Files
-            </div>
-            {watched?.watched_files?.map(f => (
-              <div
-                key={f}
-                className={`source-item${selectedSource === `file:${f}` ? ' selected' : ''}`}
-                onClick={() => toggle(`file:${f}`)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={e => e.key === 'Enter' && toggle(`file:${f}`)}
-              >
-                <PulseDot kind="active" />
-                <span className="source-item-name">{f.split(/[/\\]/).pop()}</span>
-              </div>
-            ))}
-          </div>
+          <SidebarSection title="Files">
+            {watched?.watched_files?.map(f => {
+              const name = f.split(/[/\\]/).pop() ?? f;
+              return (
+                <div
+                  key={f}
+                  className={`source-item${selectedSource === `file:${f}` ? ' selected' : ''}`}
+                  onClick={() => onSelectSource(selectedSource === `file:${f}` ? null : `file:${f}`)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => e.key === 'Enter' && onSelectSource(selectedSource === `file:${f}` ? null : `file:${f}`)}
+                >
+                  <PulseDot kind="idle" />
+                  <span className="source-item-name">{name}</span>
+                  <span className="source-item-badge">file</span>
+                </div>
+              );
+            })}
+          </SidebarSection>
         </>
       )}
-
     </div>
   );
 }

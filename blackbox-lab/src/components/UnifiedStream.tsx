@@ -27,9 +27,6 @@ interface Props {
   onCorrelate: (entry: StreamEntry) => void;
   onInspectDiff: () => void;
   onSpanSearch: (spanId: string) => void;
-  isPaused: boolean;
-  onTogglePause: () => void;
-  onClear: () => void;
   onBack?: () => void;
 }
 
@@ -141,7 +138,7 @@ export function UnifiedStream({
   logs, docker, httpErrors, compressed, diff, structured,
   selectedSource, timeFilter,
   onCorrelate, onInspectDiff, onSpanSearch,
-  isPaused, onTogglePause, onClear, onBack,
+  onBack,
 }: Props) {
   const [tab, setTab] = useState<TabKind>('all');
   const [filter, setFilter] = useState('');

@@ -4,15 +4,17 @@ import { StatusBar } from './components/StatusBar';
 import { SourceMatrix } from './components/SourceMatrix';
 import { OverviewDashboard } from './components/OverviewDashboard';
 import { TriageView } from './components/TriageView';
-import { UnifiedStream } from './components/UnifiedStream';
 import { RawLogsView } from './components/RawLogsView';
 import { CorrelationPanel } from './components/CorrelationPanel';
+import { ToastContainer } from './components/ToastContainer';
 import { useDaemon } from './hooks/useDaemon';
+import { useToast } from './hooks/useToast';
 
 export type DashboardView = 'overview' | 'triage' | 'raw';
 
 function App() {
   const daemon = useDaemon();
+  const { toasts, remove: removeToast } = useToast();
   const [view, setView] = useState<DashboardView>('overview');
   const [triageService, setTriageService] = useState<string | null>(null);
 
@@ -58,8 +60,6 @@ function App() {
       <div className="zone-timeline">
         <StatusBar
           status={daemon.status}
-          docker={daemon.docker}
-          httpErrors={daemon.httpErrors}
           daemonOnline={daemon.daemonOnline}
         />
       </div>
@@ -91,8 +91,7 @@ function App() {
             httpErrors={daemon.httpErrors}
             postmortem={daemon.postmortem}
             commits={daemon.commits}
-            watched={daemon.watched}
-            logs={daemon.logs}
+            logLines={daemon.logLines}
             daemonOnline={daemon.daemonOnline}
             onNavigateTriage={navigateTriage}
             onNavigateRaw={navigateRaw}
@@ -130,6 +129,8 @@ function App() {
         />,
         document.body
       )}
+
+      <ToastContainer toasts={toasts} onDismiss={removeToast} />
     </div>
   );
 }
