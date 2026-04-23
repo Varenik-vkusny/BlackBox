@@ -6,12 +6,10 @@ use blackbox_daemon::file_watcher;
 use blackbox_daemon::http_proxy;
 use blackbox_daemon::http_store;
 use blackbox_daemon::mcp;
-use blackbox_daemon::pii_masker;
 use blackbox_daemon::pty_capture;
 use blackbox_daemon::scanners;
 use blackbox_daemon::structured_store;
 use blackbox_daemon::tcp_bridge;
-use blackbox_daemon::typed_context;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +24,10 @@ use http_store::new_http_store;
 use scanners::drain::new_drain_state;
 use structured_store::new_structured_store;
 
+mod cli;
+use cli::{Cli, Commands};
+use clap::Parser;
+
 /// How long the primary daemon lingers after its stdio client disconnects
 /// before shutting down. This keeps the buffer alive for HTTP clients
 /// (Antigravity, blackbox-lab) after an AI session ends.
@@ -34,10 +36,46 @@ const GRACE_PERIOD_SECS: u64 = 300; // 5 minutes
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let cwd = parse_arg(&args, "--cwd").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::current_dir().expect("Cannot determine current directory")
-    });
+    let has_subcommand = args.iter().skip(1).any(|a| matches!(a.as_str(), "run" | "setup" | "update"));
 
+    let cli = if has_subcommand {
+        Cli::parse()
+    } else {
+        let mut with_run = args;
+        with_run.insert(1, "run".to_string());
+        Cli::parse_from(with_run)
+    };
+
+    match cli.command {
+        None => {
+            // Fallback: no subcommand parsed — use manual arg parsing for backward compat.
+            let args: Vec<String> = std::env::args().collect();
+            let cwd = parse_arg(&args, "--cwd").map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("Cannot determine current directory")
+            });
+            let bridge_port: u16 = parse_arg(&args, "--port")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8765);
+            let capture_shell = args.contains(&"--capture-shell".to_string());
+            let shell = parse_arg(&args, "--shell");
+            run_daemon(cwd, bridge_port, capture_shell, shell).await;
+        }
+        Some(Commands::Run { port, no_ui: _, cwd, capture_shell, shell }) => {
+            let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("Cannot determine current directory")
+            });
+            run_daemon(cwd, port, capture_shell, shell).await;
+        }
+        Some(Commands::Setup { auto }) => {
+            eprintln!("setup called (auto={auto})");
+        }
+        Some(Commands::Update) => {
+            eprintln!("update called");
+        }
+    }
+}
+
+async fn run_daemon(cwd: PathBuf, bridge_port: u16, capture_shell: bool, shell: Option<String>) {
     // ── Singleton detection ────────────────────────────────────────────────────
     // If a primary daemon is already running (port 8768 responds), act as a
     // lightweight MCP proxy: forward stdin → HTTP → stdout, then exit.
@@ -49,10 +87,6 @@ async fn main() {
     }
 
     eprintln!("BlackBox: starting as primary daemon (cwd={})", cwd.display());
-
-    let bridge_port: u16 = parse_arg(&args, "--port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8765);
 
     let state = DaemonState {
         buf: new_buffer(),
@@ -124,13 +158,12 @@ async fn main() {
     });
 
     // Native PTY capture (if requested)
-    if args.contains(&"--capture-shell".to_string()) {
-        let command = parse_arg(&args, "--shell");
+    if capture_shell {
         pty_capture::run_pty_capture(
             state.buf.clone(),
             state.drain.clone(),
             state.structured.clone(),
-            command,
+            shell,
         );
         eprintln!("BlackBox: native-pty capture started");
     }
