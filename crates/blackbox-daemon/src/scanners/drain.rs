@@ -223,7 +223,7 @@ pub fn get_error_clusters(
         })
         .cloned()
         .collect();
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by_key(|b| std::cmp::Reverse(b.count));
     result.truncate(limit);
     result
 }
