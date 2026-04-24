@@ -1,79 +1,86 @@
-use serde::Deserialize;
-
 const REPO_OWNER: &str = "Varenik-vkusny";
 const REPO_NAME: &str = "blackbox";
-
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-}
 
 pub async fn run_update() {
     let current_version = env!("CARGO_PKG_VERSION");
     println!("Current version: v{}", current_version);
 
-    let release = match fetch_latest_release().await {
-        Some(r) => r,
+    let asset_name = format_asset_name();
+    let latest_version = match fetch_latest_version(&asset_name).await {
+        Some(v) => v,
         None => {
-            eprintln!("Failed to check for updates");
+            eprintln!("Failed to check for updates. This can happen when:");
+            eprintln!("  - No release exists yet for your platform");
+            eprintln!("  - GitHub is unreachable");
+            eprintln!("  - You are behind a proxy/firewall");
+            eprintln!();
+            eprintln!("You can always download the latest release manually:");
+            eprintln!("  https://github.com/{}/{}/releases/latest", REPO_OWNER, REPO_NAME);
             std::process::exit(1);
         }
     };
 
-    let latest_version = release.tag_name.trim_start_matches('v');
     if latest_version == current_version {
         println!("Already on latest version (v{}).", current_version);
         return;
     }
 
-    println!("New version available: v{}", latest_version);
+    println!("New version available: v{} (current: v{})", latest_version, current_version);
 
-    let asset_name = format_asset_name();
-    let asset = match release.assets.iter().find(|a| a.name == asset_name) {
-        Some(a) => a,
-        None => {
-            eprintln!("No release asset found for this platform: {}", asset_name);
-            std::process::exit(1);
-        }
-    };
+    let download_url = format!(
+        "https://github.com/{}/{}/releases/download/v{}/{}",
+        REPO_OWNER, REPO_NAME, latest_version, asset_name
+    );
 
-    println!("Downloading {}...", asset.name);
+    println!("Downloading {}...", asset_name);
 
-    match download_and_replace(&asset.browser_download_url, &asset_name).await {
+    match download_and_replace(&download_url, &asset_name).await {
         Ok(()) => println!("Updated to v{}. Restart BlackBox to use the new version.", latest_version),
         Err(e) => {
             eprintln!("Update failed: {}", e);
+            #[cfg(target_os = "windows")]
+            eprintln!("On Windows, make sure BlackBox is not running as an MCP server before updating.");
             std::process::exit(1);
         }
     }
 }
 
-async fn fetch_latest_release() -> Option<Release> {
+/// Fetch the latest version by reading the first redirect Location header.
+/// GitHub redirects: /releases/latest/download/xxx.zip -> 302 -> /releases/download/vX.Y.Z/xxx.zip
+async fn fetch_latest_version(asset_name: &str) -> Option<String> {
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
-        REPO_OWNER, REPO_NAME
+        "https://github.com/{}/{}/releases/latest/download/{}",
+        REPO_OWNER, REPO_NAME, asset_name
     );
 
-    let client = reqwest::Client::new();
+    // Disable redirects so we can read the Location header of the first 302.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+
     let resp = client
-        .get(&url)
+        .head(&url)
         .header("User-Agent", "blackbox-updater")
         .send()
         .await
         .ok()?;
 
-    if !resp.status().is_success() {
+    // Expect 302 Found with Location header.
+    if resp.status() != 302 {
         return None;
     }
 
-    resp.json::<Release>().await.ok()
+    let location = resp.headers().get("location")?.to_str().ok()?;
+
+    // Extract version from URL like .../download/v0.1.2/blackbox-windows-x64.zip
+    let version = location
+        .split("/download/v")
+        .nth(1)?
+        .split('/')
+        .next()?;
+
+    Some(version.to_string())
 }
 
 fn format_asset_name() -> String {
@@ -102,7 +109,13 @@ fn format_asset_name() -> String {
 
 async fn download_and_replace(url: &str, asset_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    let bytes = client.get(url).send().await?.bytes().await?;
+    let bytes = client
+        .get(url)
+        .header("User-Agent", "blackbox-updater")
+        .send()
+        .await?
+        .bytes()
+        .await?;
 
     let current_exe = std::env::current_exe()?;
     let temp_dir = tempfile::tempdir()?;
@@ -117,10 +130,11 @@ async fn download_and_replace(url: &str, asset_name: &str) -> Result<(), Box<dyn
         extract_tar(&tar_path, temp_dir.path()).await?;
     }
 
-    #[cfg(not(target_os = "windows"))]
-    let new_binary = temp_dir.path().join("blackbox");
-    #[cfg(target_os = "windows")]
-    let new_binary = temp_dir.path().join("blackbox.exe");
+    let new_binary = if cfg!(target_os = "windows") {
+        temp_dir.path().join("blackbox.exe")
+    } else {
+        temp_dir.path().join("blackbox")
+    };
 
     if !new_binary.exists() {
         return Err("Downloaded archive does not contain 'blackbox' binary".into());
@@ -174,9 +188,12 @@ async fn replace_binary(new: &std::path::Path, current: &std::path::Path) -> Res
         if old.exists() {
             tokio::fs::remove_file(&old).await.ok();
         }
+
+        // On Windows, we cannot delete/replace a running .exe.
+        // Strategy: rename current -> .old, then copy new in place.
         tokio::fs::rename(current, &old).await?;
         tokio::fs::copy(new, current).await?;
-        println!("Old binary saved as {}. Delete it after confirming the update.", old.display());
+        println!("Old binary saved as {}. You can delete it after confirming the update.", old.display());
     }
 
     Ok(())
