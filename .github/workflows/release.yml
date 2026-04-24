@@ -52,6 +52,20 @@ jobs:
         with:
           name: frontend-dist
           path: crates/blackbox-daemon/assets/dist
+      - name: Verify frontend assets
+        shell: bash
+        run: |
+          echo "Contents of assets/dist:"
+          ls -la crates/blackbox-daemon/assets/dist/ || true
+          # If v4 placed files inside an artifact-name subfolder, flatten it
+          if [ -d "crates/blackbox-daemon/assets/dist/frontend-dist" ]; then
+            mv crates/blackbox-daemon/assets/dist/frontend-dist/* crates/blackbox-daemon/assets/dist/
+            rmdir crates/blackbox-daemon/assets/dist/frontend-dist
+          fi
+          # Ensure dist exists even if download somehow failed
+          mkdir -p crates/blackbox-daemon/assets/dist
+          echo "Final contents:"
+          ls -la crates/blackbox-daemon/assets/dist/ || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
