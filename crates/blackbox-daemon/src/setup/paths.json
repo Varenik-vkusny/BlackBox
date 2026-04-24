@@ -5,7 +5,7 @@
       "id": "claude-code",
       "paths": {
         "unix": "~/.claude/settings.json",
-        "windows": "%APPDATA%/Claude/settings.json"
+        "windows": "~/.claude/settings.json"
       }
     },
     {

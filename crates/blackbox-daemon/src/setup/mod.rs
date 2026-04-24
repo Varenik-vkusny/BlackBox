@@ -27,12 +27,26 @@ pub fn run_setup(auto: bool) {
             None => continue,
         };
 
+        // If the config file doesn't exist, try to create an empty one
+        // so we can inject the MCP server entry. This is safe for JSON
+        // config files used by all supported clients.
         if !path.exists() {
-            skipped += 1;
-            if !auto {
-                println!("{} — not detected", client.name);
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    skipped += 1;
+                    if !auto {
+                        println!("{} — not detected (cannot create dir: {})", client.name, e);
+                    }
+                    continue;
+                }
             }
-            continue;
+            if let Err(e) = std::fs::write(&path, "{}") {
+                skipped += 1;
+                if !auto {
+                    println!("{} — not detected (cannot create file: {})", client.name, e);
+                }
+                continue;
+            }
         }
 
         if !auto {
