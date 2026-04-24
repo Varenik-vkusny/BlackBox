@@ -24,18 +24,13 @@ pub async fn run_tcp_bridge(buf: SharedBuffer, drain: SharedDrainState, structur
         }
     };
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _peer)) => {
-                let buf = buf.clone();
-                let drain = drain.clone();
-                let structured = structured.clone();
-                tokio::spawn(async move {
-                    handle_connection(stream, buf, drain, structured).await;
-                });
-            }
-            Err(_) => break,
-        }
+    while let Ok((stream, _peer)) = listener.accept().await {
+        let buf = buf.clone();
+        let drain = drain.clone();
+        let structured = structured.clone();
+        tokio::spawn(async move {
+            handle_connection(stream, buf, drain, structured).await;
+        });
     }
 }
 

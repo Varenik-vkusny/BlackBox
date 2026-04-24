@@ -195,8 +195,8 @@ fn parse_unified_diff(diff: &str) -> (Vec<DiffHunk>, bool) {
     let mut truncated = false;
 
     for line in diff.lines() {
-        if line.starts_with("+++ b/") {
-            current_file = line[6..].to_string();
+        if let Some(stripped) = line.strip_prefix("+++ b/") {
+            current_file = stripped.to_string();
         } else if line.starts_with("@@ ") {
             // Flush previous hunk
             if let Some(h) = current_hunk.take() {
@@ -218,12 +218,12 @@ fn parse_unified_diff(diff: &str) -> (Vec<DiffHunk>, bool) {
             if hunk.lines.len() >= MAX_HUNK_LINES {
                 continue; // silently drop excess lines (truncated per-hunk)
             }
-            let (kind, text) = if line.starts_with('+') {
-                (HunkLineKind::Added, line[1..].to_string())
-            } else if line.starts_with('-') {
-                (HunkLineKind::Removed, line[1..].to_string())
-            } else if line.starts_with(' ') {
-                (HunkLineKind::Context, line[1..].to_string())
+            let (kind, text) = if let Some(stripped) = line.strip_prefix('+') {
+                (HunkLineKind::Added, stripped.to_string())
+            } else if let Some(stripped) = line.strip_prefix('-') {
+                (HunkLineKind::Removed, stripped.to_string())
+            } else if let Some(stripped) = line.strip_prefix(' ') {
+                (HunkLineKind::Context, stripped.to_string())
             } else {
                 continue;
             };

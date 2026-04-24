@@ -197,8 +197,8 @@ async fn get_compressed_errors(
     let source = args["source"].as_str();
     let data = collect_compressed_errors_data(state, limit, source).await;
 
-    let has_clusters = data["clusters"].as_array().map_or(false, |a| !a.is_empty());
-    let has_traces = data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
+    let has_clusters = data["clusters"].as_array().is_some_and(|a| !a.is_empty());
+    let has_traces = data["stack_traces"].as_array().is_some_and(|a| !a.is_empty());
 
     if !has_clusters && !has_traces {
         // Fallback: return raw terminal buffer so AI has something to work with.
@@ -276,8 +276,8 @@ async fn get_contextual_diff(state: &DaemonState, args: &Value) -> Value {
 
     // Diff was empty — fall back to compressed errors for useful context.
     let err_data = collect_compressed_errors_data(state, 50, terminal).await;
-    let has_clusters = err_data["clusters"].as_array().map_or(false, |a| !a.is_empty());
-    let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
+    let has_clusters = err_data["clusters"].as_array().is_some_and(|a| !a.is_empty());
+    let has_traces = err_data["stack_traces"].as_array().is_some_and(|a| !a.is_empty());
 
     if has_clusters || has_traces {
         return json!({
@@ -350,8 +350,8 @@ async fn get_container_logs(state: &DaemonState, args: &Value) -> Value {
 
     // Docker not reachable — fall back to compressed errors then terminal buffer.
     let err_data = collect_compressed_errors_data(state, 50, container_id).await;
-    let has_clusters = err_data["clusters"].as_array().map_or(false, |a| !a.is_empty());
-    let has_traces = err_data["stack_traces"].as_array().map_or(false, |a| !a.is_empty());
+    let has_clusters = err_data["clusters"].as_array().is_some_and(|a| !a.is_empty());
+    let has_traces = err_data["stack_traces"].as_array().is_some_and(|a| !a.is_empty());
 
     if has_clusters || has_traces {
         return json!({
@@ -492,11 +492,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
             let nearby: Vec<Value> = all_docker
                 .iter()
                 .filter(|de| {
-                    let diff = if de.timestamp_ms > tl.timestamp_ms {
-                        de.timestamp_ms - tl.timestamp_ms
-                    } else {
-                        tl.timestamp_ms - de.timestamp_ms
-                    };
+                    let diff = de.timestamp_ms.abs_diff(tl.timestamp_ms);
                     diff <= window_secs * 1_000
                 })
                 .map(|de| json!({"source": de.source, "text": de.text, "level": de.level}))
@@ -512,7 +508,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
     let has_docker_correlations = correlations.iter().any(|c| {
         c["correlated_docker_events"]
             .as_array()
-            .map_or(false, |a: &Vec<Value>| !a.is_empty())
+            .is_some_and(|a: &Vec<Value>| !a.is_empty())
     });
 
     // Also correlate with HTTP errors (third source)
@@ -524,7 +520,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
             let nearby_http: Vec<Value> = all_http
                 .iter()
                 .filter(|he| {
-                    let diff = if he.timestamp_ms > ts { he.timestamp_ms - ts } else { ts - he.timestamp_ms };
+                    let diff = he.timestamp_ms.abs_diff(ts);
                     diff <= window_secs * 1_000
                 })
                 .map(|he| json!({"method": he.method, "url": he.url, "status": he.status, "latency_ms": he.latency_ms}))
@@ -539,7 +535,7 @@ pub async fn get_correlated_errors(state: &DaemonState, args: &Value) -> Value {
     let has_http_correlations = correlations.iter().any(|c| {
         c["correlated_http_errors"]
             .as_array()
-            .map_or(false, |a: &Vec<Value>| !a.is_empty())
+            .is_some_and(|a: &Vec<Value>| !a.is_empty())
     });
     let has_correlations = has_docker_correlations || has_http_correlations;
 

@@ -45,19 +45,6 @@ pub async fn run_mcp_stdio(state: DaemonState) -> bool {
     handled_any
 }
 
-fn extract_method(line: &str) -> String {
-    // serde_json serializes as compact: "method":"foo" — no spaces
-    for prefix in &[r#""method":""#, r#""method": ""#] {
-        if let Some(start) = line.find(prefix) {
-            let rest = &line[start + prefix.len()..];
-            if let Some(end) = rest.find('"') {
-                return rest[..end].to_string();
-            }
-        }
-    }
-    "<unknown>".to_string()
-}
-
 async fn handle_message(line: &str, state: &DaemonState) -> Option<JsonRpcResponse> {
     let req: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,

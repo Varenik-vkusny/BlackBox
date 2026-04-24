@@ -88,12 +88,10 @@ pub async fn run_file_watcher(
     // Bridge: sync notify events → async channel
     let (bridge_tx, mut bridge_rx) = mpsc::channel::<PathBuf>(256);
     std::thread::spawn(move || {
-        for event in notify_rx {
-            if let Ok(ev) = event {
-                if matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                    for path in ev.paths {
-                        let _ = bridge_tx.blocking_send(path);
-                    }
+        for ev in notify_rx.into_iter().flatten() {
+            if matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                for path in ev.paths {
+                    let _ = bridge_tx.blocking_send(path);
                 }
             }
         }

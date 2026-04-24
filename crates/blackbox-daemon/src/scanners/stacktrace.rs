@@ -109,9 +109,7 @@ fn try_parse_rust(lines: &[LogLine], start: usize) -> Option<(ParsedStackTrace, 
         } else if !frames.is_empty() && trimmed.starts_with("error[") {
             // Another compiler error block starts — stop here.
             break;
-        } else if frames.len() >= 3 && !trimmed.starts_with(|c: char| c.is_ascii_digit() || c == 'a' || c == '|' || c == '=') {
-            break;
-        } else if j - start > 40 {
+        } else if (frames.len() >= 3 && !trimmed.starts_with(|c: char| c.is_ascii_digit() || c == 'a' || c == '|' || c == '=')) || j - start > 40 {
             break;
         }
         j += 1;
@@ -237,9 +235,7 @@ fn try_parse_nodejs(lines: &[LogLine], start: usize) -> Option<(ParsedStackTrace
                 line,
                 is_user_code: is_user,
             });
-        } else if !frames.is_empty() {
-            break;
-        } else if j - start > 3 {
+        } else if !frames.is_empty() || j - start > 3 {
             break;
         }
         j += 1;
@@ -405,7 +401,7 @@ fn try_parse_java(lines: &[LogLine], start: usize) -> Option<(ParsedStackTrace, 
         j += 1;
     }
 
-    if frames.len() < 1 {
+    if frames.is_empty() {
         return None;
     }
 

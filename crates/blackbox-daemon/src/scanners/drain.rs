@@ -144,8 +144,7 @@ pub fn ingest_line(state: &SharedDrainState, line: &LogLine) {
     // Walk the trie using the first TRIE_TOKEN_DEPTH tokens.
     let depth = token_count.min(TRIE_TOKEN_DEPTH);
     let mut node = root;
-    for i in 0..depth {
-        let token = &tokens[i];
+    for token in tokens.iter().take(depth) {
         node = node
             .children
             .entry(token.clone())
@@ -291,7 +290,7 @@ fn detect_level(text: &str) -> Option<String> {
 // ── Trie traversal helpers ──────────────────────────────────────────────────────
 
 /// Collect references to every cluster in the trie.
-fn collect_all_clusters<'a>(roots: &'a HashMap<usize, TreeNode>) -> Vec<&'a LogCluster> {
+fn collect_all_clusters(roots: &HashMap<usize, TreeNode>) -> Vec<&LogCluster> {
     let mut out = Vec::with_capacity(roots.len() * 4);
     for root in roots.values() {
         collect_from_node(root, &mut out);

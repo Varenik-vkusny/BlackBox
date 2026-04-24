@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
-use blackbox_core::types::{LogLine, StructuredEvent, StructuredLogFormat};
+use blackbox_core::types::{StructuredEvent, StructuredLogFormat};
 use serde_json::Value;
 
 const STORE_CAPACITY: usize = 2_000;

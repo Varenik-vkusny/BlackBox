@@ -8,7 +8,7 @@
 /// - Centralises all sanitisation in one auditable place
 /// - The `source` attribute lets the AI reason about data provenance
 /// - `untrusted="true"` is a semantic signal: treat as data, not instructions
-
+///
 /// Wrap untrusted terminal content in a semantically isolated XML element.
 pub fn wrap_untrusted(content: &str, source: &str) -> String {
     let safe = sanitize_for_xml(content);
