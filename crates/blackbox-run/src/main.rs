@@ -7,7 +7,6 @@
 /// the child's PID: {"t":"process:<pid>","d":"<line>"}.
 ///
 /// If the TCP bridge is unavailable, the command still runs normally (no capture).
-
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
@@ -58,7 +57,7 @@ fn main() {
     let stdout_thread = thread::spawn(move || {
         let reader = BufReader::new(child_stdout);
         let mut out = std::io::stdout();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let _ = writeln!(out, "{line}");
             send_to_bridge(&tcp_out, &tag_out, &line);
         }
@@ -69,7 +68,7 @@ fn main() {
     let stderr_thread = thread::spawn(move || {
         let reader = BufReader::new(child_stderr);
         let mut err = std::io::stderr();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let _ = writeln!(err, "{line}");
             send_to_bridge(&tcp_err, &tag_err, &line);
         }
